@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+sqlalchemy
+google-auth
+google-auth-oauthlib
+google-api-python-client
+requests
+pdf2image
+PyMuPDF
+pandas
+playwright
+matplotlib
+scikit-learn
+google-generativeai
