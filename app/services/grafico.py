@@ -1,11 +1,16 @@
 import pandas as pd
 import re
+import os
 import google.generativeai as genai
 from pdf2image import convert_from_path
 from PIL import Image
 
-# Configurar Gemini
-genai.configure(api_key="AIzaSyD7ZiFXkHuT-npzaoSX8HPogB9zjwh_jfk")  # Reemplazá esto con tu clave real
+# Configurar Gemini usando variable de entorno
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+if not GEMINI_API_KEY:
+    raise ValueError("La variable de entorno GEMINI_API_KEY no está configurada")
+
+genai.configure(api_key=GEMINI_API_KEY)
 modelo = genai.GenerativeModel("gemini-1.5-flash")
 
 def extraer_grafico(nombre_pdf, output_path, dpi=200):
