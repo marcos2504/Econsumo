@@ -23,7 +23,7 @@ def detectar_anomalias_por_nic(db: Session, nic: str):
     resultados = []
 
     for trimestre, grupo in df.groupby("trimestre"):
-        if len(grupo) < 3:
+        if len(grupo) < 0:
             continue
 
         num_trim = trimestre.quarter
