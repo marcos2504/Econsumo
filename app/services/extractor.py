@@ -156,9 +156,8 @@ def descargar_factura_pdf(url, index):
                     df = analizar_con_gemini(imagen_nombre)
                     for _, row in df.iterrows():
                         registro = HistoricoConsumo(
-                            nic=factura.nic,
                             fecha=row['fecha'],
-                            consumo_kwh=row['consumo_wh'] ,
+                            consumo_kwh=row['consumo_wh'],
                             factura_id=factura.id
                         )
                         db.add(registro)

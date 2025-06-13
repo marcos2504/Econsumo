@@ -2,11 +2,15 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sqlalchemy.orm import Session
 from app.models.historico_model import HistoricoConsumo
+from app.models.factura_model import Factura
 
 def detectar_anomalias_por_nic(db: Session, nic: str):
-    df = pd.read_sql(db.query(HistoricoConsumo)
-                     .filter(HistoricoConsumo.nic == nic)
-                     .statement, db.bind)
+    # Buscar históricos a través de la relación con facturas
+    query = db.query(HistoricoConsumo)\
+              .join(Factura, HistoricoConsumo.factura_id == Factura.id)\
+              .filter(Factura.nic == nic)
+    
+    df = pd.read_sql(query.statement, db.bind)
 
     if df.empty:
         return []
