@@ -1,144 +1,152 @@
+import os
+import requests
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from app.services.auth import get_current_user, authenticate_with_google, logger
-from app.services.jwt_service import verify_token, create_access_token, create_test_token
+from app.services.auth import get_current_user, verify_google_token, logger
+from app.services.jwt_service import create_access_token
 from app.db.session import get_db
 from app.models.user_model import User
-from app.schemas.user_schemas import UserResponse, TokenResponse, TokenRequest
+from app.schemas.user_schemas import UserResponse, TokenResponse
+from app.crud.user_crud import get_or_create_user, get_user_by_email
 
 router = APIRouter()
 
 @router.get("/health")
 def health_check():
-    """
-    Endpoint GET /auth/health
-    Endpoint simple que responde con código 200 OK
-    No requiere autenticación
-    """
+    """Endpoint simple de salud de la API"""
     return {
         "status": "ok",
         "message": "API funcionando correctamente",
         "timestamp": "2025-06-13"
     }
 
-@router.post("/token", response_model=TokenResponse)
-def validar_token(token_request: TokenRequest):
-    """
-    Endpoint POST /auth/token
-    Recibe y valida un token de autenticación existente
-    Devuelve el mismo token si es válido o un error si no lo es
-    """
-    try:
-        # Verificar que el token sea válido
-        token_data = verify_token(token_request.token)
-        
-        # Si llegamos aquí, el token es válido
-        return TokenResponse(token=token_request.token)
-        
-    except HTTPException as e:
-        # Re-lanzar la excepción HTTP con el código de estado apropiado
-        raise e
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor"
-        )
-
-@router.post("/google", response_model=TokenResponse)
-def autenticar_con_google(
+@router.post("/android", response_model=TokenResponse)
+def autenticar_android(
     email: str = Query(..., description="Email del usuario autenticado con Google"),
-    token: str = Query(..., description="Token de identificación de Google"),
-    gmail_token: str = Query(None, description="Access Token de Google para Gmail (opcional)"),
+    id_token: str = Query(..., description="ID Token de Google desde Android"),
+    server_auth_code: str = Query(None, description="Server Auth Code de Google desde Android"),
     db: Session = Depends(get_db)
 ):
     """
-    Endpoint POST /auth/google
-    Recibe email y token de Google OAuth desde la aplicación Android
-    Verifica la autenticidad del token con la API de Google
-    Crea o actualiza el usuario en la base de datos
-    Opcionalmente guarda el token de Gmail si se proporciona
-    Genera un JWT para la sesión del usuario
+    🤖 Endpoint ÚNICO para autenticación desde Android
+    
+    Flujo completo:
+    1. Autentica al usuario con el ID Token
+    2. Intercambia el Server Auth Code por Access Token de Gmail
+    3. Guarda ambos tokens en la base de datos
+    4. Retorna JWT para la sesión
     """
     try:
-        # Autenticar con Google y obtener JWT
-        result = authenticate_with_google(email, token, db)
+        logger.info(f"🤖 Iniciando autenticación Android para: {email}")
         
-        # Si se proporciona gmail_token, guardarlo en la base de datos
-        if gmail_token:
-            from app.crud.user_crud import get_user_by_email
-            user = get_user_by_email(db, email)
-            if user:
-                user.gmail_token = gmail_token
-                db.commit()
-                logger.info(f"Token de Gmail guardado para usuario: {email}")
+        # 1. Verificar y autenticar con ID Token
+        token_data = verify_google_token(id_token)
         
-        return TokenResponse(token=result["token"])
+        # Verificar que el email coincida
+        if token_data.get("email") != email:
+            logger.warning(f"Email no coincide: esperado {email}, recibido {token_data.get('email')}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="El email no coincide con el token de Google"
+            )
         
-    except HTTPException as e:
-        # Re-lanzar la excepción HTTP con el código de estado apropiado
-        raise e
+        # Extraer información del usuario
+        google_id = token_data.get("sub")
+        name = token_data.get("name")
+        picture = token_data.get("picture")
+        
+        if not google_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token de Google no contiene información suficiente"
+            )
+        
+        # 2. Intercambiar Server Auth Code por Gmail Access Token
+        gmail_access_token = None
+        if server_auth_code:
+            try:
+                gmail_access_token = exchange_server_auth_code_for_gmail_token(server_auth_code)
+                logger.info(f"✅ Access token de Gmail obtenido para: {email}")
+            except Exception as e:
+                logger.warning(f"⚠️ No se pudo obtener access token de Gmail: {e}")
+                # No fallar si no se puede obtener el token de Gmail
+        
+        # 3. Crear o actualizar usuario con toda la información
+        user = get_or_create_user(
+            db=db,
+            email=email,
+            google_id=google_id,
+            name=name,
+            picture=picture,
+            gmail_token=gmail_access_token
+        )
+        
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario inactivo"
+            )
+        
+        # 4. Generar JWT para la sesión
+        access_token = create_access_token(
+            data={"sub": user.email, "user_id": user.id}
+        )
+        
+        logger.info(f"✅ Autenticación Android exitosa para: {user.email}")
+        if gmail_access_token:
+            logger.info(f"🔐 Token de Gmail guardado correctamente")
+        
+        return TokenResponse(token=access_token)
+        
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"❌ Error en autenticación Android: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error interno del servidor: {str(e)}"
         )
 
-@router.post("/google/query", response_model=TokenResponse)
-def autenticar_con_google_query(
-    email: str = Query(..., description="Email del usuario autenticado con Google"),
-    token: str = Query(..., description="Token de identificación de Google"),
-    db: Session = Depends(get_db)
-):
+def exchange_server_auth_code_for_gmail_token(server_auth_code: str) -> str:
     """
-    Endpoint POST /auth/google/query
-    Endpoint alternativo para compatibilidad con aplicación Android
-    Funciona igual que /auth/google
+    Intercambia el Server Auth Code por un Access Token de Gmail
     """
     try:
-        # Usar la misma función de autenticación
-        result = authenticate_with_google(email, token, db)
-        return TokenResponse(token=result["token"])
+        # Configuración OAuth2 desde variables de entorno
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
         
-    except HTTPException as e:
-        raise e
+        if not client_id or not client_secret:
+            raise ValueError("GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET deben estar configurados en .env")
+        
+        # Intercambiar el código por tokens
+        token_url = "https://oauth2.googleapis.com/token"
+        data = {
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'code': server_auth_code,
+            'grant_type': 'authorization_code',
+            'access_type': 'offline'
+        }
+        
+        response = requests.post(token_url, data=data)
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            access_token = token_data.get('access_token')
+            
+            if access_token:
+                logger.info("🔄 Access token intercambiado exitosamente")
+                return access_token
+            else:
+                raise ValueError("No se recibió access_token en la respuesta de Google")
+        else:
+            logger.error(f"Error en intercambio de token: {response.status_code} - {response.text}")
+            raise ValueError(f"Error al intercambiar token con Google: {response.status_code}")
+            
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error interno del servidor: {str(e)}"
-        )
-
-@router.post("/google/gmail", response_model=TokenResponse)
-def autenticar_con_google_gmail(
-    email: str = Query(..., description="Email del usuario"),
-    id_token: str = Query(..., description="ID Token de Google"),
-    gmail_token: str = Query(..., description="Access Token de Google para Gmail"),
-    db: Session = Depends(get_db)
-):
-    """
-    Endpoint para autenticación con permisos de Gmail
-    Guarda tanto el JWT interno como el access token de Gmail
-    """
-    try:
-        # Verificar ID token como antes
-        result = authenticate_with_google(email, id_token, db)
-        
-        # Buscar el usuario y guardar el token de Gmail
-        from app.crud.user_crud import get_user_by_email
-        user = get_user_by_email(db, email)
-        if user:
-            user.gmail_token = gmail_token
-            db.commit()
-            logger.info(f"Token de Gmail guardado para usuario: {email}")
-        
-        return TokenResponse(token=result["token"])
-        
-    except HTTPException as e:
+        logger.error(f"Error al intercambiar server auth code: {e}")
         raise e
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error interno del servidor: {str(e)}"
-        )
 
 @router.post("/update-gmail-token")
 def actualizar_gmail_token(
@@ -147,11 +155,13 @@ def actualizar_gmail_token(
     db: Session = Depends(get_db)
 ):
     """
-    Actualizar el token de Gmail del usuario autenticado
+    🔄 Actualizar solo el token de Gmail del usuario autenticado
     """
     try:
         current_user.gmail_token = gmail_token
         db.commit()
+        
+        logger.info(f"🔐 Token de Gmail actualizado para: {current_user.email}")
         
         return {
             "message": "Token de Gmail actualizado correctamente",
@@ -160,99 +170,24 @@ def actualizar_gmail_token(
         }
         
     except Exception as e:
+        logger.error(f"❌ Error al actualizar token de Gmail: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al actualizar token de Gmail: {str(e)}"
         )
 
-# Endpoints adicionales para compatibilidad y utilidad
-@router.post("/legacy/token")
-def crear_token_legacy():
-    """Endpoint legacy para generar token básico"""
-    try:
-        # Crear un token básico sin datos específicos del usuario
-        access_token = create_access_token(
-            data={"sub": "legacy_user", "user_id": 0}
-        )
-        return {"access_token": access_token, "token_type": "bearer"}
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al generar token legacy: {str(e)}"
-        )
-
 @router.get("/me", response_model=UserResponse)
 def obtener_usuario_actual(current_user: User = Depends(get_current_user)):
-    """Obtener información del usuario autenticado"""
+    """👤 Obtener información del usuario autenticado"""
     return current_user
 
 @router.get("/validate")
 def validar_sesion(current_user: User = Depends(get_current_user)):
-    """Validar que el token de sesión sea válido"""
+    """✅ Validar que el JWT sea válido y obtener información básica"""
     return {
         "valid": True,
         "user_id": current_user.id,
         "email": current_user.email,
-        "name": current_user.name
+        "name": current_user.name,
+        "has_gmail_token": bool(current_user.gmail_token)
     }
-
-@router.post("/debug/token")
-def generar_token_debug():
-    """
-    Endpoint temporal para generar un token de prueba
-    SOLO PARA DESARROLLO - REMOVER EN PRODUCCIÓN
-    """
-    try:
-        # Crear token con datos de tu usuario
-        access_token = create_test_token(
-            email="marcosibarra1234@gmail.com",
-            user_id=1
-        )
-        return {
-            "token": access_token,
-            "type": "bearer",
-            "expires_in": 7 * 24 * 60 * 60,  # 7 días en segundos
-            "instructions": "Copia este token y úsalo en Authorization: Bearer [token]"
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al generar token: {str(e)}"
-        )
-
-@router.post("/simple-auth")
-def autenticacion_simple(
-    email: str = Query(..., description="Email del usuario"),
-    db: Session = Depends(get_db)
-):
-    """
-    Autenticación simple SIN verificar con Google (solo para desarrollo)
-    """
-    try:
-        from app.crud.user_crud import get_or_create_user
-        
-        # Crear usuario sin verificar con Google
-        user = get_or_create_user(
-            db=db,
-            email=email,
-            google_id=f"dev_{email}",  # ID falso para desarrollo
-            name="Usuario de Desarrollo",
-            picture=None
-        )
-        
-        # Crear JWT
-        access_token = create_access_token(
-            data={"sub": user.email, "user_id": user.id}
-        )
-        
-        return {
-            "token": access_token,
-            "message": "Autenticación de desarrollo exitosa",
-            "warning": "Este endpoint NO verifica con Google"
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error: {str(e)}"
-        )

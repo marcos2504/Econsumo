@@ -1,3 +1,9 @@
+from dotenv import load_dotenv
+import os
+
+# Cargar variables de entorno al inicio
+load_dotenv()
+
 from fastapi import FastAPI
 from app.api import factura_api, auth_api, historico_api, anomalias_api, users_api
 

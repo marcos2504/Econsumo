@@ -19,8 +19,7 @@ logger = logging.getLogger(__name__)
 security = HTTPBearer()
 
 # Google OAuth settings
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "575643410417-l5sbvsrooteah5h4bm9f4slm5e1ilnv3.apps.googleusercontent.com")
-
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 # Gmail API settings (para el extractor de facturas)
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 TOKEN_PATH = 'token.json'
@@ -62,7 +61,7 @@ def verify_google_token(token: str) -> dict:
             detail=f"Error al verificar token de Google: {str(e)}",
         )
 
-def authenticate_with_google(email: str, google_token: str, db: Session) -> dict:
+def authenticate_with_google(email: str, google_token: str, db: Session, gmail_token: str = None) -> dict:
     """Autenticar usuario con Google OAuth y retornar JWT"""
     from app.services.jwt_service import create_access_token
     
@@ -93,13 +92,14 @@ def authenticate_with_google(email: str, google_token: str, db: Session) -> dict
         
         logger.info(f"Obteniendo o creando usuario: {email}")
         
-        # Obtener o crear usuario
+        # Obtener o crear usuario, incluyendo gmail_token si se proporciona
         user = get_or_create_user(
             db=db,
             email=email,
             google_id=google_id,
             name=name,
-            picture=picture
+            picture=picture,
+            gmail_token=gmail_token
         )
         
         if not user.is_active:
@@ -114,6 +114,9 @@ def authenticate_with_google(email: str, google_token: str, db: Session) -> dict
         )
         
         logger.info(f"Autenticación exitosa para usuario: {user.email}")
+        if gmail_token:
+            logger.info(f"Token de Gmail guardado para usuario: {user.email}")
+        
         return {"token": access_token}
         
     except HTTPException:
