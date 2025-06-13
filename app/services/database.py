@@ -4,7 +4,7 @@ Servicio para manejo de base de datos
 import os
 from app.db.session import engine, DATABASE_URL
 from app.db.base import Base
-from app.models import factura_model, historico_model
+from app.models import factura_model, historico_model, user_model
 
 def init_db_if_not_exists():
     """
@@ -20,7 +20,7 @@ def init_db_if_not_exists():
             # Crear todas las tablas
             Base.metadata.create_all(bind=engine)
             print("✅ Base de datos inicializada correctamente")
-            print("✅ Tablas creadas: facturas, historico_consumo")
+            print("✅ Tablas creadas: users, facturas, historico_consumo")
             return True
         except Exception as e:
             print(f"❌ Error al inicializar la base de datos: {e}")

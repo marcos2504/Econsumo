@@ -14,13 +14,35 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from app.services.grafico import extraer_grafico, analizar_con_gemini
 from app.models.historico_model import HistoricoConsumo
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
 
 EMAIL_QUERY = 'subject:"Factura Digital"'
 
 # === GMAIL ===
-def get_service():
-    creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-    return build('gmail', 'v1', credentials=creds)
+def get_service(gmail_token=None):
+    """
+    Obtener servicio de Gmail usando token OAuth o archivo token.json
+    """
+    try:
+        if gmail_token:
+            # Usar token OAuth directamente
+            creds = Credentials(
+                token=gmail_token,
+                scopes=SCOPES
+            )
+        else:
+            # Usar archivo token.json (método original)
+            if not os.path.exists(TOKEN_PATH):
+                raise FileNotFoundError(f"No se encontró {TOKEN_PATH} y no se proporcionó gmail_token")
+            creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+        
+        return build('gmail', 'v1', credentials=creds)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al crear servicio de Gmail: {str(e)}"
+        )
 
 def get_html_part(payload):
     if 'parts' in payload:
@@ -106,7 +128,7 @@ def extraer_info_pdf(nombre_pdf):
     }
 
 # === Descarga PDF y guarda en DB ===
-def descargar_factura_pdf(url, index):
+def descargar_factura_pdf(url, index, user_id):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         context = browser.new_context()
@@ -136,7 +158,7 @@ def descargar_factura_pdf(url, index):
                 datos["link"] = url
                 datos["imagen"] = ""
 
-                # Guardar en DB
+                # Guardar en DB con user_id
                 db = SessionLocal()
                 factura = Factura(
                     nic=datos['nic'],
@@ -144,7 +166,8 @@ def descargar_factura_pdf(url, index):
                     fecha_lectura=datos['fecha_lectura'],
                     consumo_kwh=datos['consumo_kwh'],
                     link=datos['link'],
-                    imagen=""
+                    imagen="",
+                    user_id=user_id
                 )
                 db.add(factura)
                 db.commit()
@@ -176,12 +199,21 @@ def descargar_factura_pdf(url, index):
             browser.close()
 
 # === Función principal de sincronización ===
-def sincronizar_facturas():
-    service = get_service()
-    links = get_edemsa_links(service)
-    nuevas = []
-    for i, link in enumerate(links):
-        factura = descargar_factura_pdf(link, i)
-        if factura:
-            nuevas.append(factura)
-    return nuevas
+def sincronizar_facturas(user_id, gmail_token=None):
+    """
+    Función principal de sincronización con soporte para token OAuth
+    """
+    try:
+        service = get_service(gmail_token)
+        links = get_edemsa_links(service)
+        nuevas = []
+        for i, link in enumerate(links):
+            factura = descargar_factura_pdf(link, i, user_id)
+            if factura:
+                nuevas.append(factura)
+        return {"facturas_sincronizadas": len(nuevas), "facturas": nuevas}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error en sincronización: {str(e)}"
+        )

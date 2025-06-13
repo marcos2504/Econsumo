@@ -4,11 +4,11 @@ from sqlalchemy.orm import Session
 from app.models.historico_model import HistoricoConsumo
 from app.models.factura_model import Factura
 
-def detectar_anomalias_por_nic(db: Session, nic: str):
-    # Buscar históricos a través de la relación con facturas
+def detectar_anomalias_por_nic(db: Session, nic: str, user_id: int):
+    # Buscar históricos a través de la relación con facturas filtrado por usuario
     query = db.query(HistoricoConsumo)\
               .join(Factura, HistoricoConsumo.factura_id == Factura.id)\
-              .filter(Factura.nic == nic)
+              .filter(Factura.nic == nic, Factura.user_id == user_id)
     
     df = pd.read_sql(query.statement, db.bind)
 
@@ -57,8 +57,8 @@ def detectar_anomalias_por_nic(db: Session, nic: str):
         return pd.concat(resultados).to_dict(orient="records")
     return []
 
-def alerta_anomalia_actual(db: Session, nic: str):
-    anomalias = detectar_anomalias_por_nic(db, nic)
+def alerta_anomalia_actual(db: Session, nic: str, user_id: int):
+    anomalias = detectar_anomalias_por_nic(db, nic, user_id)
     if not anomalias:
         return {"estado": "sin_datos"}
     anomalias.sort(key=lambda x: pd.to_datetime(x["fecha"]))

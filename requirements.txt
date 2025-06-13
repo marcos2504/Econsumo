@@ -12,3 +12,6 @@ playwright
 matplotlib
 scikit-learn
 google-generativeai
+python-jose[cryptography]
+python-multipart
+passlib[bcrypt]

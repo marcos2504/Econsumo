@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Float
+from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy.orm import relationship
 from app.db.base import Base
 
 class Factura(Base):
@@ -11,3 +12,7 @@ class Factura(Base):
     consumo_kwh = Column(Float)
     link = Column(String)
     imagen = Column(String)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    # Relación con usuario
+    user = relationship("User", back_populates="facturas")
