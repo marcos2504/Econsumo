@@ -19,11 +19,4 @@ class User(Base):
     # Relación con facturas
     facturas = relationship("Factura", back_populates="user")
     
-    # Propiedad para compatibilidad con 'name'
-    @property
-    def name(self):
-        return self.full_name
-    
-    @name.setter
-    def name(self, value):
-        self.full_name = value
+    # Nuevas relaciones para no

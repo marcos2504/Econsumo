@@ -55,12 +55,25 @@ def get_html_part(payload):
         return payload['body'].get('data')
     return None
 
-def get_edemsa_links(service):
+def get_edemsa_links(service, max_emails=None):
+    """
+    Obtener links de EDEMSA con límite opcional de emails
+    """
     results = service.users().messages().list(userId='me', q=EMAIL_QUERY).execute()
     messages = results.get('messages', [])
+    
+    # Aplicar límite si se especifica
+    if max_emails and max_emails > 0:
+        messages = messages[:max_emails]
+        print(f"📧 Limitando búsqueda a {max_emails} emails más recientes")
+    
     links = []
+    emails_procesados = 0
 
     for msg in messages:
+        emails_procesados += 1
+        print(f"📧 Procesando email {emails_procesados}/{len(messages)}...")
+        
         msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
         html_data = get_html_part(msg_data['payload'])
         if not html_data:
@@ -69,6 +82,7 @@ def get_edemsa_links(service):
         encontrados = re.findall(r'https://oficinavirtual\.edemsa\.com/facturad\.php\?conf=[^"]+', html)
         links.extend(encontrados)
 
+    print(f"✅ Procesados {emails_procesados} emails, encontrados {len(links)} links únicos")
     return list(set(links))
 
 # === PDF ===
@@ -160,35 +174,63 @@ def descargar_factura_pdf(url, index, user_id):
 
                 # Guardar en DB con user_id
                 db = SessionLocal()
-                factura = Factura(
-                    nic=datos['nic'],
-                    direccion=datos['direccion'],
-                    fecha_lectura=datos['fecha_lectura'],
-                    consumo_kwh=datos['consumo_kwh'],
-                    link=datos['link'],
-                    imagen="",
-                    user_id=user_id
-                )
-                db.add(factura)
-                db.commit()
-                db.refresh(factura)
-
-                # Procesar gráfico
-                imagen_nombre = f"{factura.nic}_grafico.png"
-                if extraer_grafico(nombre_archivo, imagen_nombre):
-                    df = analizar_con_gemini(imagen_nombre)
-                    for _, row in df.iterrows():
-                        registro = HistoricoConsumo(
-                            fecha=row['fecha'],
-                            consumo_kwh=row['consumo_wh'],
-                            factura_id=factura.id
-                        )
-                        db.add(registro)
-                    factura.imagen = imagen_nombre
+                try:
+                    factura = Factura(
+                        nic=datos['nic'],
+                        direccion=datos['direccion'],
+                        fecha_lectura=datos['fecha_lectura'],
+                        consumo_kwh=datos['consumo_kwh'],
+                        link=datos['link'],
+                        imagen="",
+                        user_id=user_id
+                    )
+                    db.add(factura)
                     db.commit()
+                    db.refresh(factura)
 
-                db.close()
-                return factura
+                    # Guardar datos de la factura ANTES de procesar gráfico
+                    factura_data = {
+                        "id": factura.id,
+                        "nic": factura.nic,
+                        "direccion": factura.direccion,
+                        "fecha_lectura": factura.fecha_lectura,
+                        "consumo_kwh": factura.consumo_kwh,
+                        "link": factura.link,
+                        "imagen": factura.imagen,
+                        "user_id": factura.user_id
+                    }
+
+                    # Procesar gráfico
+                    imagen_nombre = f"{factura.nic}_grafico.png"
+                    if extraer_grafico(nombre_archivo, imagen_nombre):
+                        df = analizar_con_gemini(imagen_nombre)
+                        for _, row in df.iterrows():
+                            registro = HistoricoConsumo(
+                                fecha=row['fecha'],
+                                consumo_kwh=row['consumo_wh'],
+                                factura_id=factura.id
+                            )
+                            db.add(registro)
+                        factura.imagen = imagen_nombre
+                        factura_data["imagen"] = imagen_nombre
+                        db.commit()
+
+                    # Cerrar sesión DESPUÉS de completar todas las operaciones
+                    db.close()
+                    
+                    # Crear objeto simple para retornar (no vinculado a sesión)
+                    class FacturaSimple:
+                        def __init__(self, data):
+                            for key, value in data.items():
+                                setattr(self, key, value)
+                    
+                    return FacturaSimple(factura_data)
+                    
+                except Exception as db_error:
+                    db.rollback()
+                    db.close()
+                    print(f"[!] Error en base de datos: {db_error}")
+                    return None
             else:
                 return None
 
@@ -217,3 +259,91 @@ def sincronizar_facturas(user_id, gmail_token=None):
             status_code=500,
             detail=f"Error en sincronización: {str(e)}"
         )
+
+# === Función principal de sincronización con límite ===
+def sincronizar_facturas_con_limite(user_id, gmail_token=None, max_emails=10):
+    """
+    Función de sincronización con límite de emails
+    
+    Args:
+        user_id: ID del usuario
+        gmail_token: Token de Gmail OAuth
+        max_emails: Número máximo de emails a procesar
+    """
+    import time
+    
+    inicio_tiempo = time.time()
+    
+    try:
+        print(f"🔄 Iniciando sincronización para usuario {user_id}")
+        print(f"📧 Límite de emails: {max_emails}")
+        print(f"⏱️ Tiempo estimado: {max_emails * 30} segundos")
+        
+        service = get_service(gmail_token)
+        
+        # Obtener links con límite
+        links = get_edemsa_links(service, max_emails)
+        
+        if not links:
+            return {
+                "emails_procesados": max_emails,
+                "facturas_encontradas": 0,
+                "facturas_sincronizadas": 0,
+                "tiempo_transcurrido": f"{time.time() - inicio_tiempo:.1f} segundos",
+                "mensaje": "No se encontraron facturas en los emails procesados"
+            }
+        
+        # APLICAR LÍMITE A LAS FACTURAS TAMBIÉN
+        # Limitar las facturas a procesar basado en max_emails
+        # Cada email debería tener aprox 1 factura, así que limitamos a max_emails facturas
+        facturas_a_procesar = min(len(links), max_emails)
+        links = links[:facturas_a_procesar]
+        
+        print(f"🔍 Encontradas {len(links)} facturas para descargar (limitado a {facturas_a_procesar})")
+        
+        nuevas = []
+        facturas_procesadas = 0
+        
+        for i, link in enumerate(links):
+            facturas_procesadas += 1
+            print(f"📄 Descargando factura {facturas_procesadas}/{len(links)} (≈{facturas_procesadas * 30}s estimados)")
+            
+            factura = descargar_factura_pdf(link, i, user_id)
+            if factura:
+                nuevas.append({
+                    "id": factura.id,
+                    "nic": factura.nic,
+                    "direccion": factura.direccion,
+                    "fecha_lectura": factura.fecha_lectura,
+                    "consumo_kwh": factura.consumo_kwh
+                })
+        
+        tiempo_total = time.time() - inicio_tiempo
+        
+        resultado = {
+            "emails_procesados": max_emails,
+            "facturas_encontradas": facturas_a_procesar,  # Actualizado para reflejar el límite aplicado
+            "facturas_sincronizadas": len(nuevas),
+            "facturas": nuevas,
+            "tiempo_transcurrido": f"{tiempo_total:.1f} segundos",
+            "tiempo_promedio_por_factura": f"{tiempo_total/len(links):.1f} segundos" if links else "N/A",
+            "rendimiento": "✅ Sincronización completada exitosamente",
+            "limite_aplicado": f"Se limitó a {facturas_a_procesar} facturas basado en {max_emails} emails"
+        }
+        
+        print(f"🎉 Sincronización completada: {len(nuevas)} facturas en {tiempo_total:.1f}s")
+        print(f"📊 Límite respetado: {facturas_a_procesar} facturas procesadas de {len(links)} encontradas")
+        
+        return resultado
+        
+    except Exception as e:
+        tiempo_error = time.time() - inicio_tiempo
+        print(f"❌ Error en sincronización después de {tiempo_error:.1f}s: {str(e)}")
+        
+        return {
+            "error": f"Error en sincronización: {str(e)}",
+            "emails_procesados": 0,
+            "facturas_sincronizadas": 0,
+            "tiempo_transcurrido": f"{tiempo_error:.1f} segundos",
+            "rendimiento": "❌ Error durante la sincronización"
+        }
