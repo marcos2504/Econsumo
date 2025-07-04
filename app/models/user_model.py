@@ -11,7 +11,8 @@ class User(Base):
     google_id = Column(String, unique=True, index=True)
     full_name = Column(String)  # Usar full_name como en la DB existente
     picture = Column(String)
-    gmail_token = Column(Text)
+    gmail_token = Column(Text)  # Access token para Gmail API
+    gmail_refresh_token = Column(Text)  # Refresh token para renovar access token
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

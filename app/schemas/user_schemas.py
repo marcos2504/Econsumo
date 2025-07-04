@@ -10,12 +10,14 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     google_id: str
     gmail_token: Optional[str] = None
+    gmail_refresh_token: Optional[str] = None
 
 class UserUpdate(BaseModel):
     email: Optional[str] = None
     full_name: Optional[str] = None
     picture: Optional[str] = None
     gmail_token: Optional[str] = None
+    gmail_refresh_token: Optional[str] = None
 
 class UserResponse(UserBase):
     id: int

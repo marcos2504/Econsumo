@@ -61,7 +61,13 @@ def verify_google_token(token: str) -> dict:
             detail=f"Error al verificar token de Google: {str(e)}",
         )
 
-def authenticate_with_google(email: str, google_token: str, db: Session, gmail_token: str = None) -> dict:
+def authenticate_with_google(
+    email: str, 
+    google_token: str, 
+    db: Session, 
+    gmail_token: str = None,
+    gmail_refresh_token: str = None
+) -> dict:
     """Autenticar usuario con Google OAuth y retornar JWT"""
     from app.services.jwt_service import create_access_token
     
@@ -92,14 +98,21 @@ def authenticate_with_google(email: str, google_token: str, db: Session, gmail_t
         
         logger.info(f"Obteniendo o creando usuario: {email}")
         
-        # Obtener o crear usuario, incluyendo gmail_token si se proporciona
+        # Log de tokens recibidos (sin mostrar el contenido completo por seguridad)
+        if gmail_token:
+            logger.info(f"Gmail access token recibido: {gmail_token[:20]}...")
+        if gmail_refresh_token:
+            logger.info(f"Gmail refresh token recibido: {gmail_refresh_token[:20]}...")
+        
+        # Obtener o crear usuario, incluyendo ambos tokens si se proporcionan
         user = get_or_create_user(
             db=db,
             email=email,
             google_id=google_id,
             name=name,
             picture=picture,
-            gmail_token=gmail_token
+            gmail_token=gmail_token,
+            gmail_refresh_token=gmail_refresh_token
         )
         
         if not user.is_active:
@@ -115,9 +128,18 @@ def authenticate_with_google(email: str, google_token: str, db: Session, gmail_t
         
         logger.info(f"Autenticación exitosa para usuario: {user.email}")
         if gmail_token:
-            logger.info(f"Token de Gmail guardado para usuario: {user.email}")
+            logger.info(f"Gmail access token guardado para usuario: {user.email}")
+        if gmail_refresh_token:
+            logger.info(f"Gmail refresh token guardado para usuario: {user.email} - ¡CRÍTICO PARA NOTIFICACIONES!")
         
-        return {"token": access_token}
+        return {
+            "token": access_token,
+            "user_info": {
+                "email": user.email,
+                "has_gmail_token": bool(user.gmail_token),
+                "has_refresh_token": bool(user.gmail_refresh_token)
+            }
+        }
         
     except HTTPException:
         raise

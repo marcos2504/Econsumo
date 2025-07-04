@@ -61,24 +61,33 @@ def autenticar_android(
                 detail="Token de Google no contiene información suficiente"
             )
         
-        # 2. Intercambiar Server Auth Code por Gmail Access Token
+        # 2. Intercambiar Server Auth Code por Gmail Tokens (access + refresh)
         gmail_access_token = None
+        gmail_refresh_token = None
+        
         if server_auth_code:
             try:
-                gmail_access_token = exchange_server_auth_code_for_gmail_token(server_auth_code)
-                logger.info(f"✅ Access token de Gmail obtenido para: {email}")
+                token_result = exchange_server_auth_code_for_gmail_token(server_auth_code)
+                gmail_access_token = token_result.get("access_token")
+                gmail_refresh_token = token_result.get("refresh_token")
+                
+                logger.info(f"✅ Tokens de Gmail obtenidos para: {email}")
+                if gmail_refresh_token:
+                    logger.info(f"🎉 ¡REFRESH TOKEN obtenido! Notificaciones disponibles para: {email}")
+                
             except Exception as e:
-                logger.warning(f"⚠️ No se pudo obtener access token de Gmail: {e}")
+                logger.warning(f"⚠️ No se pudieron obtener tokens de Gmail: {e}")
                 # No fallar si no se puede obtener el token de Gmail
         
-        # 3. Crear o actualizar usuario con toda la información
+        # 3. Crear o actualizar usuario con AMBOS tokens
         user = get_or_create_user(
             db=db,
             email=email,
             google_id=google_id,
             name=name,
             picture=picture,
-            gmail_token=gmail_access_token
+            gmail_token=gmail_access_token,
+            gmail_refresh_token=gmail_refresh_token  # ¡AHORA SÍ SE INCLUYE!
         )
         
         if not user.is_active:
@@ -94,9 +103,23 @@ def autenticar_android(
         
         logger.info(f"✅ Autenticación Android exitosa para: {user.email}")
         if gmail_access_token:
-            logger.info(f"🔐 Token de Gmail guardado correctamente")
+            logger.info(f"🔐 Gmail access token guardado correctamente")
+        if gmail_refresh_token:
+            logger.info(f"🔄 Gmail refresh token guardado - ¡NOTIFICACIONES HABILITADAS!")
         
-        return TokenResponse(token=access_token)
+        # Crear respuesta extendida con información de tokens
+        response_data = {
+            "token": access_token,
+            "user_info": {
+                "email": user.email,
+                "name": user.full_name,
+                "has_gmail_access": bool(gmail_access_token),
+                "has_refresh_token": bool(gmail_refresh_token),
+                "notifications_enabled": bool(gmail_refresh_token)
+            }
+        }
+        
+        return response_data
         
     except HTTPException:
         raise
@@ -107,9 +130,15 @@ def autenticar_android(
             detail=f"Error interno del servidor: {str(e)}"
         )
 
-def exchange_server_auth_code_for_gmail_token(server_auth_code: str) -> str:
+def exchange_server_auth_code_for_gmail_token(server_auth_code: str) -> dict:
     """
-    Intercambia el Server Auth Code por un Access Token de Gmail
+    Intercambia el Server Auth Code por Access Token Y Refresh Token de Gmail
+    
+    Returns:
+        dict: {
+            "access_token": str,
+            "refresh_token": str (si está disponible)
+        }
     """
     try:
         # Configuración OAuth2 desde variables de entorno
@@ -126,18 +155,32 @@ def exchange_server_auth_code_for_gmail_token(server_auth_code: str) -> str:
             'client_secret': client_secret,
             'code': server_auth_code,
             'grant_type': 'authorization_code',
-            'access_type': 'offline'
+            'access_type': 'offline',  # ¡CRUCIAL para obtener refresh token!
+            'scope': 'https://www.googleapis.com/auth/gmail.readonly'
         }
         
+        logger.info(f"🔄 Intercambiando server auth code por tokens...")
         response = requests.post(token_url, data=data)
         
         if response.status_code == 200:
             token_data = response.json()
             access_token = token_data.get('access_token')
+            refresh_token = token_data.get('refresh_token')
+            
+            logger.info(f"✅ Tokens obtenidos - Access: {'SÍ' if access_token else 'NO'}, Refresh: {'SÍ' if refresh_token else 'NO'}")
             
             if access_token:
-                logger.info("🔄 Access token intercambiado exitosamente")
-                return access_token
+                result = {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token  # Puede ser None si no está disponible
+                }
+                
+                if refresh_token:
+                    logger.info("🎉 ¡REFRESH TOKEN OBTENIDO! Notificaciones habilitadas.")
+                else:
+                    logger.warning("⚠️ No se obtuvo refresh token. Es posible que el usuario ya haya autorizado antes.")
+                
+                return result
             else:
                 raise ValueError("No se recibió access_token en la respuesta de Google")
         else:
@@ -191,3 +234,56 @@ def validar_sesion(current_user: User = Depends(get_current_user)):
         "name": current_user.name,
         "has_gmail_token": bool(current_user.gmail_token)
     }
+
+@router.get("/verificar_tokens")
+def verificar_tokens_usuario(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    🔍 VERIFICAR ESTADO DE TOKENS DEL USUARIO
+    Endpoint para verificar si el usuario tiene todos los tokens necesarios
+    """
+    try:
+        # Refrescar datos del usuario desde la DB
+        user = get_user_by_email(db, current_user.email)
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Usuario no encontrado"
+            )
+        
+        # Verificar estado de tokens
+        tiene_gmail_access = bool(user.gmail_token)
+        tiene_refresh_token = bool(user.gmail_refresh_token)
+        
+        # Determinar capacidades
+        puede_sincronizar = tiene_gmail_access
+        puede_notificaciones = tiene_refresh_token
+        
+        return {
+            "usuario": user.email,
+            "tokens": {
+                "gmail_access_token": tiene_gmail_access,
+                "gmail_refresh_token": tiene_refresh_token
+            },
+            "capacidades": {
+                "sincronizar_facturas": puede_sincronizar,
+                "recibir_notificaciones": puede_notificaciones
+            },
+            "recomendaciones": {
+                "necesita_reautenticar": not tiene_refresh_token,
+                "mensaje": "¡Perfecto! Tienes todos los permisos." if tiene_refresh_token 
+                          else "Reautentícate para habilitar notificaciones."
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verificando tokens: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno: {str(e)}"
+        )
