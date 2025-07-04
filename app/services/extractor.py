@@ -17,7 +17,7 @@ from app.models.historico_model import HistoricoConsumo
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-EMAIL_QUERY = 'subject:"Factura Digital"'
+EMAIL_QUERY = 'subject:"EDEMSA Factura Digital"'
 
 # === GMAIL ===
 def get_service(gmail_token=None):
@@ -204,13 +204,85 @@ def descargar_factura_pdf(url, index, user_id):
                     imagen_nombre = f"{factura.nic}_grafico.png"
                     if extraer_grafico(nombre_archivo, imagen_nombre):
                         df = analizar_con_gemini(imagen_nombre)
+                        
+                        # 🚨 VALIDACIÓN DE DUPLICADOS A NIVEL DE USUARIO + NIC
+                        # Obtener todos los registros existentes para este usuario + NIC
+                        registros_existentes = set()
+                        historico_existente = db.query(HistoricoConsumo)\
+                                               .join(Factura, HistoricoConsumo.factura_id == Factura.id)\
+                                               .filter(
+                                                   Factura.user_id == factura.user_id,
+                                                   Factura.nic == factura.nic
+                                               ).all()
+                        
+                        print(f"🔍 VALIDACIÓN: Buscando duplicados para usuario {factura.user_id}, NIC {factura.nic}")
+                        print(f"🔍 VALIDACIÓN: Encontrados {len(historico_existente)} registros existentes")
+                        
+                        for registro_existente in historico_existente:
+                            # Extraer año y mes de la fecha existente (formato: MM/YY)
+                            fecha_str = registro_existente.fecha
+                            if '/' in fecha_str:
+                                partes = fecha_str.split('/')
+                                if len(partes) >= 2:
+                                    mes = partes[0].zfill(2)  # Asegurar 2 dígitos
+                                    año = partes[-1]  # Último elemento (año)
+                                    
+                                    # Normalizar año a formato corto (24, 25, etc.)
+                                    if len(año) == 4:
+                                        año_corto = año[-2:]  # 2024 → 24
+                                    else:
+                                        año_corto = año.zfill(2)  # 24 → 24
+                                    
+                                    clave_mes_año = f"{mes}/{año_corto}"
+                                    registros_existentes.add(clave_mes_año)
+                                    print(f"🔍 VALIDACIÓN: Registrada fecha existente: {fecha_str} → {clave_mes_año}")
+                        
+                        print(f"🔍 VALIDACIÓN: Set de fechas existentes: {registros_existentes}")
+                        
+                        # Procesar cada registro del DataFrame
+                        registros_agregados = 0
+                        registros_duplicados = 0
+                        
                         for _, row in df.iterrows():
+                            fecha_nueva = row['fecha']
+                            
+                            # Extraer mes y año de la fecha nueva
+                            clave_nueva = None
+                            if '/' in fecha_nueva:
+                                partes_nueva = fecha_nueva.split('/')
+                                if len(partes_nueva) >= 2:
+                                    mes_nuevo = partes_nueva[0].zfill(2)
+                                    año_nuevo = partes_nueva[-1]
+                                    
+                                    # Normalizar año a formato corto (24, 25, etc.)
+                                    if len(año_nuevo) == 4:
+                                        año_nuevo_corto = año_nuevo[-2:]  # 2024 → 24
+                                    else:
+                                        año_nuevo_corto = año_nuevo.zfill(2)  # 24 → 24
+                                    
+                                    clave_nueva = f"{mes_nuevo}/{año_nuevo_corto}"
+                            
+                            # Verificar si ya existe un registro para este mes/año en este usuario+NIC
+                            if clave_nueva and clave_nueva in registros_existentes:
+                                registros_duplicados += 1
+                                print(f"⚠️ Duplicado omitido: {fecha_nueva} para NIC {factura.nic} usuario {factura.user_id} (ya existe {clave_nueva})")
+                                continue
+                            
+                            # Agregar nuevo registro si no existe
                             registro = HistoricoConsumo(
-                                fecha=row['fecha'],
+                                fecha=fecha_nueva,
                                 consumo_kwh=row['consumo_wh'],
                                 factura_id=factura.id
                             )
                             db.add(registro)
+                            registros_agregados += 1
+                            
+                            # Actualizar set de registros existentes
+                            if clave_nueva:
+                                registros_existentes.add(clave_nueva)
+                        
+                        print(f"✅ Histórico procesado para NIC {factura.nic}: {registros_agregados} nuevos, {registros_duplicados} duplicados omitidos")
+                        
                         factura.imagen = imagen_nombre
                         factura_data["imagen"] = imagen_nombre
                         db.commit()

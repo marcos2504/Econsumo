@@ -167,4 +167,3 @@ get_current_user = get_current_user_from_jwt
 
 # Mantener compatibilidad con código existente
 
-

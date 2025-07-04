@@ -24,12 +24,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def create_test_token(email: str = "marcosibarra1234@gmail.com", user_id: int = 1):
-    """Crear token de prueba para desarrollo"""
-    return create_access_token(
-        data={"sub": email, "user_id": user_id}
-    )
-
 def verify_token(token: str):
     """Verificar y decodificar token JWT"""
     try:

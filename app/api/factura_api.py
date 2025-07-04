@@ -244,34 +244,39 @@ def obtener_estadisticas_sync(
         "limite_maximo": "50 emails (25 minutos)"
     }
 
-# 🔐 ENDPOINT CON JWT - OBTENER NICS DEL USUARIO AUTENTICADO
+# ENDPOINT TEMPORAL SIN JWT - OBTENER NICS ÚNICOS (ARRAY SIMPLE)
 @router.get("/nics")
-def obtener_nics_usuario_autenticado(
-    formato: Optional[str] = Query(default="simple", description="Formato: 'simple' para array, 'completo' para objeto con info"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)  # 🔑 JWT automático
+def obtener_nics_sin_jwt(
+    user_id: Optional[int] = Query(default=2, description="ID del usuario (temporal)"),
+    formato: Optional[str] = Query(default="simple", description="Formato de respuesta: 'simple' para array, 'completo' para objeto"),
+    db: Session = Depends(get_db)
 ):
     """
-    🔐 ENDPOINT CON JWT - Obtener NICs del usuario autenticado
-    
-    El usuario se obtiene automáticamente del token JWT.
-    No necesitas pasar user_id desde el frontend.
+    ENDPOINT TEMPORAL SIN JWT - Solo para pruebas
+    Obtener todos los NICs únicos asociados a un usuario
     
     Args:
-        formato: 'simple' → array de strings | 'completo' → objeto con info detallada
+        user_id: ID del usuario (default=2)
+        formato: 'simple' devuelve array, 'completo' devuelve objeto con info
     
     Returns:
-        - formato="simple": ["3005000", "3012578"]
-        - formato="completo": objeto con info detallada de cada NIC
-    
-    Headers requeridos:
-        Authorization: Bearer <tu_jwt_token>
+        Array de NICs únicos del usuario o objeto completo según formato
     """
     try:
-        # 🎯 Usar automáticamente current_user.id del JWT
-        user_id = current_user.id
+        # Verificar que el usuario existe
+        user = db.query(User).filter(User.id == user_id).first()
         
-        # Obtener NICs únicos del usuario autenticado
+        if not user:
+            if formato == "simple":
+                return []
+            else:
+                return {
+                    "error": f"Usuario con ID {user_id} no encontrado",
+                    "nics": [],
+                    "total_nics": 0
+                }
+        
+        # Obtener NICs únicos del usuario
         resultados = db.query(Factura.nic).filter(
             Factura.user_id == user_id,
             Factura.nic.isnot(None),
@@ -313,10 +318,10 @@ def obtener_nics_usuario_autenticado(
                 "nics_con_info": nics_con_info,
                 "total_nics": len(nics_unicos),
                 "usuario": {
-                    "id": current_user.id,
-                    "email": current_user.email
+                    "id": user.id,
+                    "email": user.email
                 },
-                "modo": "CON_JWT_SEGURO"  # 🔐 Indicador de que usa JWT
+                "modo": "SIN_JWT_TEMPORAL"
             }
         
     except Exception as e:
@@ -327,67 +332,254 @@ def obtener_nics_usuario_autenticado(
                 "error": f"Error obteniendo NICs: {str(e)}",
                 "nics": [],
                 "total_nics": 0,
-                "user_id": current_user.id
+                "user_id": user_id
             }
 
-# 🔧 ENDPOINT ALTERNATIVO SIN JWT (solo para desarrollo/testing)
-@router.get("/nics-dev")
-def obtener_nics_sin_jwt_desarrollo(
-    user_id: Optional[int] = Query(default=2, description="ID del usuario (solo desarrollo)"),
-    formato: Optional[str] = Query(default="simple", description="Formato de respuesta"),
-    db: Session = Depends(get_db)
+# ENDPOINT ORIGINAL CON JWT PARA NICS (para producción)
+@router.get("/nics_con_jwt")
+def obtener_nics_con_jwt(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """
-    🔧 ENDPOINT SIN JWT - Solo para desarrollo y testing
+    🏠 OBTENER NICS CON DETALLES PARA SELECTOR
+    Endpoint optimizado para el frontend Android con estructura exacta de NicsResponse
     
-    ⚠️ ADVERTENCIA: Este endpoint NO es seguro para producción.
-    Usar solo durante desarrollo local.
-    
-    Para producción usar: GET /facturas/nics (con JWT)
+    Returns:
+        Estructura compatible con data class NicsResponse de Kotlin:
+        - nics: Lista de strings
+        - nics_con_direccion: Lista de objetos NicConDireccion
+        - selector_items: Lista de objetos SelectorItem
+        - total_nics: Número total
+        - usuario: Email del usuario
     """
     try:
-        # Verificar que el usuario existe
-        user = db.query(User).filter(User.id == user_id).first()
-        
-        if not user:
-            if formato == "simple":
-                return []
-            return {
-                "error": f"Usuario con ID {user_id} no encontrado",
-                "nics": [],
-                "total_nics": 0
-            }
-        
         # Obtener NICs únicos del usuario
-        resultados = db.query(Factura.nic).filter(
-            Factura.user_id == user_id,
-            Factura.nic.isnot(None),
-            Factura.nic != ""
-        ).distinct().all()
+        nics_unicos = db.query(Factura.nic)\
+                       .filter(
+                           Factura.user_id == current_user.id,
+                           Factura.nic.isnot(None),
+                           Factura.nic != ""
+                       )\
+                       .distinct()\
+                       .all()
         
-        nics_unicos = [r[0] for r in resultados if r[0]]
+        # Listas para la respuesta
+        nics = []  # Lista simple de strings
+        nics_con_direccion = []  # Lista de objetos con dirección
+        selector_items = []  # Lista de items para el selector
         
-        if formato == "simple":
-            return nics_unicos
-        else:
-            return {
-                "nics": nics_unicos,
-                "total_nics": len(nics_unicos),
-                "usuario": {
-                    "id": user.id,
-                    "email": user.email
-                },
-                "modo": "SIN_JWT_DESARROLLO",
-                "advertencia": "Este endpoint no es seguro para producción"
-            }
+        for (nic,) in nics_unicos:
+            if nic:  # Verificar que el NIC no sea nulo
+                # Agregar a lista simple
+                nics.append(nic)
+                
+                # Contar facturas para este NIC
+                total_facturas = db.query(Factura).filter(
+                    Factura.user_id == current_user.id,
+                    Factura.nic == nic
+                ).count()
+                
+                # Obtener la última factura para info adicional
+                ultima_factura = db.query(Factura).filter(
+                    Factura.user_id == current_user.id,
+                    Factura.nic == nic
+                ).order_by(Factura.id.desc()).first()
+                
+                # Preparar datos
+                direccion = ultima_factura.direccion if ultima_factura else "Dirección no disponible"
+                ultima_fecha = ultima_factura.fecha_lectura if ultima_factura else "Sin fecha"
+                
+                # Crear dirección corta (primeras 30 caracteres + ...)
+                direccion_corta = direccion[:30] + "..." if len(direccion) > 30 else direccion
+                
+                # Agregar a nics_con_direccion
+                nics_con_direccion.append({
+                    "nic": nic,
+                    "direccion": direccion,
+                    "direccion_corta": direccion_corta,
+                    "ultima_fecha": ultima_fecha,
+                    "total_facturas": total_facturas
+                })
+                
+                # Crear labels para selector
+                label = f"NIC: {nic}"
+                label_completo = f"Propiedad NIC {nic} - {direccion_corta}"
+                info = f"{total_facturas} facturas • Última: {ultima_fecha}"
+                subtitle = f"{direccion_corta} • {total_facturas} facturas"
+                
+                # Agregar a selector_items
+                selector_items.append({
+                    "value": nic,
+                    "label": label,
+                    "label_completo": label_completo,
+                    "info": info,
+                    "subtitle": subtitle
+                })
+        
+        # Respuesta en formato exacto de NicsResponse (Kotlin)
+        return {
+            "nics": nics,
+            "nics_con_direccion": nics_con_direccion,
+            "selector_items": selector_items,
+            "total_nics": len(nics),
+            "usuario": current_user.email
+        }
         
     except Exception as e:
-        if formato == "simple":
-            return []
         return {
-            "error": f"Error: {str(e)}",
             "nics": [],
-            "total_nics": 0
+            "nics_con_direccion": [],
+            "selector_items": [],
+            "total_nics": 0,
+            "usuario": current_user.email if current_user else None,
+            "error": f"Error obteniendo NICs: {str(e)}"
+        }
+
+@router.get("/estado_sync")
+def estado_sincronizacion(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    📊 ESTADO DE SINCRONIZACIÓN DEL USUARIO
+    Mostrar información sobre facturas y última sincronización
+    
+    Returns:
+        Estado actual de sincronización, facturas procesadas, etc.
+    """
+    try:
+        # Contar facturas del usuario
+        total_facturas = db.query(Factura).filter(Factura.user_id == current_user.id).count()
+        
+        # Obtener última factura procesada
+        ultima_factura = db.query(Factura)\
+                         .filter(Factura.user_id == current_user.id)\
+                         .order_by(Factura.id.desc())\
+                         .first()
+        
+        # Obtener NICs únicos
+        nics_query = db.query(Factura.nic)\
+                      .filter(Factura.user_id == current_user.id)\
+                      .distinct()
+        nics_unicos = [row.nic for row in nics_query.all()]
+        
+        # Información de la última factura
+        info_ultima = None
+        if ultima_factura:
+            # Contar registros históricos de la última factura
+            from app.models.historico_model import HistoricoConsumo
+            historicos_ultima = db.query(HistoricoConsumo)\
+                               .filter(HistoricoConsumo.factura_id == ultima_factura.id)\
+                               .count()
+            
+            info_ultima = {
+                "id": ultima_factura.id,
+                "nic": ultima_factura.nic,
+                "fecha_procesamiento": ultima_factura.fecha_procesamiento.isoformat() if ultima_factura.fecha_procesamiento else None,
+                "direccion": ultima_factura.direccion,
+                "registros_historicos": historicos_ultima
+            }
+        
+        return {
+            "usuario": current_user.email,
+            "estado": "sincronizado" if total_facturas > 0 else "sin_datos",
+            "total_facturas": total_facturas,
+            "nics_encontrados": len(nics_unicos),
+            "nics": nics_unicos,
+            "ultima_factura": info_ultima,
+            "recomendacion": "Datos actualizados" if total_facturas > 0 else "Ejecute sincronización para obtener datos"
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Error obteniendo estado de sincronización: {str(e)}",
+            "usuario": current_user.email,
+            "estado": "error"
+        }
+
+@router.post("/sync_inteligente_con_jwt")
+def sync_inteligente_con_jwt(
+    max_emails: Optional[int] = Query(default=10, description="Número máximo de emails a procesar"),
+    forzar_sync: Optional[bool] = Query(default=False, description="Forzar sincronización completa"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    🔄 SINCRONIZACIÓN INTELIGENTE CON JWT
+    Sincronización optimizada que detecta si es primera vez o incremental
+    
+    Args:
+        max_emails: Máximo número de emails a procesar (1-20)
+        forzar_sync: Si es True, procesa todos los emails aunque ya existan facturas
+    
+    Returns:
+        Resultado de la sincronización con detalles de procesamiento
+    """
+    try:
+        # Validaciones
+        if max_emails < 1 or max_emails > 20:
+            return {
+                "error": "max_emails debe estar entre 1 y 20 para sincronización inteligente",
+                "max_emails_recibido": max_emails,
+                "usuario": current_user.email
+            }
+        
+        # Verificar si el usuario ya tiene facturas
+        facturas_existentes = db.query(Factura).filter(Factura.user_id == current_user.id).count()
+        
+        es_primera_vez = facturas_existentes == 0
+        
+        if es_primera_vez:
+            modo_sync = "primera_vez"
+            limite_recomendado = min(max_emails, 10)  # Límite más conservador para primera vez
+        elif forzar_sync:
+            modo_sync = "forzada_completa"
+            limite_recomendado = max_emails
+        else:
+            modo_sync = "incremental"
+            limite_recomendado = min(max_emails, 5)  # Pocas facturas para incremental
+        
+        # Verificar que el usuario tenga gmail_token
+        if not current_user.gmail_token:
+            return {
+                "error": "Usuario no tiene token de Gmail configurado",
+                "usuario": current_user.email,
+                "solucion": "Realice login nuevamente incluyendo permisos de Gmail",
+                "sync_realizado": False
+            }
+        
+        # Ejecutar sincronización
+        resultado_sync = sincronizar_facturas_con_limite(
+            user_id=current_user.id,
+            gmail_token=current_user.gmail_token,
+            max_emails=limite_recomendado
+        )
+        
+        # Contar facturas después de la sincronización
+        facturas_despues = db.query(Factura).filter(Factura.user_id == current_user.id).count()
+        facturas_nuevas = facturas_despues - facturas_existentes
+        
+        # Información de resultado
+        return {
+            "sync_completado": True,
+            "modo_sincronizacion": modo_sync,
+            "es_primera_vez": es_primera_vez,
+            "usuario": current_user.email,
+            "emails_procesados": limite_recomendado,
+            "facturas_antes": facturas_existentes,
+            "facturas_despues": facturas_despues,
+            "facturas_nuevas": facturas_nuevas,
+            "resultado_extractor": resultado_sync,
+            "recomendacion": "Sincronización completa" if facturas_nuevas > 0 else "No se encontraron facturas nuevas"
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Error en sincronización inteligente: {str(e)}",
+            "usuario": current_user.email,
+            "sync_completado": False,
+            "modo_sincronizacion": modo_sync if 'modo_sync' in locals() else "desconocido"
         }
 
 

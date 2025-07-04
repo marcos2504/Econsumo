@@ -2,13 +2,15 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.modelo import detectar_anomalias_por_nic, alerta_anomalia_actual
-from app.services.auth import get_current_user
 from app.models.user_model import User
+from app.models.factura_model import Factura
+from app.models.historico_model import HistoricoConsumo
+from app.services.auth import get_current_user
 from typing import Optional
+from sqlalchemy import desc
 
 router = APIRouter()
 
-# ENDPOINTS SIN JWT - Solo para pruebas
 @router.get("/nic/{nic}")
 def obtener_anomalias(
     nic: str, 
@@ -44,6 +46,62 @@ def obtener_anomalias(
             "error": f"Error obteniendo anomalías: {str(e)}",
             "nic": nic,
             "user_id": user_id
+        }
+
+@router.get("/anomalias_con_jwt/{nic}")
+def obtener_anomalias_con_jwt(
+    nic: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    🔐 ENDPOINT CON JWT - OBTENER ANOMALÍAS
+    Endpoint principal con autenticación JWT para obtener anomalías
+    Compatible con AnomaliasJwtResponse de Android Kotlin
+    
+    Args:
+        nic: Número de NIC a consultar
+    
+    Returns:
+        Estructura AnomaliasJwtResponse con:
+        - nic: String
+        - usuario: String
+        - anomalias: List<AnomaliaInfo>
+        - total_anomalias: Int
+        - error: String? (opcional)
+    """
+    try:
+        # Obtener anomalías usando el servicio existente
+        anomalias_result = detectar_anomalias_por_nic(db, nic, current_user.id)
+        
+        # Procesar las anomalías para el formato esperado
+        anomalias_lista = []
+        
+        if isinstance(anomalias_result, dict) and "anomalias" in anomalias_result:
+            for anomalia in anomalias_result["anomalias"]:
+                anomalias_lista.append({
+                    "fecha": anomalia.get("fecha"),
+                    "consumo_kwh": anomalia.get("consumo_kwh"),
+                    "anomalia": 1 if anomalia.get("anomalia", False) else 0,
+                    "comparado_trimestre": anomalia.get("comparado_trimestre"),
+                    "mensaje": anomalia.get("mensaje")
+                })
+        
+        # Estructura final compatible con AnomaliasJwtResponse
+        return {
+            "nic": nic,
+            "usuario": current_user.email,
+            "anomalias": anomalias_lista,
+            "total_anomalias": len(anomalias_lista)
+        }
+        
+    except Exception as e:
+        return {
+            "nic": nic,
+            "usuario": current_user.email if current_user else "Error",
+            "anomalias": [],
+            "total_anomalias": 0,
+            "error": f"Error obteniendo anomalías: {str(e)}"
         }
 
 @router.get("/alerta/{nic}")
@@ -84,51 +142,129 @@ def alerta_anomalia(
             "estado": "error"
         }
 
-# ENDPOINTS CON JWT (para producción con frontend)
 @router.get("/consultar_consumo/{nic}")
-def consultar_consumo(
+def consultar_consumo_completo(
     nic: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    user_id: Optional[int] = Query(default=2, description="ID del usuario (temporal)"),
+    db: Session = Depends(get_db)
 ):
     """
-    🎯 ENDPOINT PRINCIPAL PARA FRONTEND
-    Consultar consumo y detectar anomalías usando JWT
+    🔍 ENDPOINT PRINCIPAL - CONSULTAR CONSUMO Y ANOMALÍAS
+    Endpoint principal que devuelve toda la información de consumo y anomalías
+    Compatible con ConsumoResponse de Android Kotlin
     
     Args:
         nic: Número de NIC a consultar
+        user_id: ID del usuario (default=2)
     
     Returns:
-        Información completa de consumo y anomalías
+        Estructura ConsumoResponse con:
+        - alerta_actual: AlertaInfo
+        - anomalias_historicas: List<AnomaliaInfo>
+        - resumen: ResumenConsumo
     """
     try:
-        # Obtener alerta de anomalía más reciente
-        alerta = alerta_anomalia_actual(db, nic, current_user.id)
+        # Verificar que el usuario existe
+        user = db.query(User).filter(User.id == user_id).first()
         
-        # Obtener todas las anomalías para análisis adicional
-        anomalias = detectar_anomalias_por_nic(db, nic, current_user.id)
+        if not user:
+            return {
+                "nic": nic,
+                "usuario": "Usuario no encontrado",
+                "alerta_actual": {
+                    "nic": nic,
+                    "estado": "usuario_no_encontrado",
+                    "anomalia": False,
+                    "mensaje": f"Usuario con ID {user_id} no encontrado"
+                },
+                "anomalias_historicas": [],
+                "resumen": {
+                    "tiene_anomalia_actual": False,
+                    "total_anomalias": 0,
+                    "ultimo_consumo": None,
+                    "fecha_ultimo": None,
+                    "variacion_porcentual": None
+                }
+            }
         
-        # Preparar respuesta unificada
+        # 1. OBTENER ALERTA ACTUAL
+        alerta_info = alerta_anomalia_actual(db, nic, user_id)
+        
+        # 2. OBTENER ANOMALÍAS HISTÓRICAS
+        anomalias_result = detectar_anomalias_por_nic(db, nic, user_id)
+        anomalias_historicas = []
+        
+        if isinstance(anomalias_result, dict) and "anomalias" in anomalias_result:
+            for anomalia in anomalias_result["anomalias"]:
+                anomalias_historicas.append({
+                    "fecha": anomalia.get("fecha"),
+                    "consumo_kwh": anomalia.get("consumo_kwh"),
+                    "anomalia": 1 if anomalia.get("anomalia", False) else 0,
+                    "comparado_trimestre": anomalia.get("comparado_trimestre"),
+                    "mensaje": anomalia.get("mensaje")
+                })
+        
+        # 3. OBTENER ÚLTIMO CONSUMO PARA RESUMEN
+        ultima_factura = db.query(Factura).filter(
+            Factura.user_id == user_id,
+            Factura.nic == nic
+        ).order_by(desc(Factura.id)).first()
+        
+        ultimo_consumo = None
+        fecha_ultimo = None
+        variacion_porcentual = None
+        
+        if ultima_factura:
+            # Buscar el último histórico de consumo
+            ultimo_historico = db.query(HistoricoConsumo).filter(
+                HistoricoConsumo.factura_id == ultima_factura.id
+            ).order_by(desc(HistoricoConsumo.id)).first()
+            
+            if ultimo_historico:
+                ultimo_consumo = ultimo_historico.consumo_kwh
+                fecha_ultimo = ultimo_historico.fecha_lectura
+                
+                # Calcular variación si hay datos de comparación
+                if hasattr(alerta_info, 'get') and alerta_info.get("comparado_trimestre"):
+                    variacion_porcentual = alerta_info.get("comparado_trimestre")
+        
+        # 4. CREAR RESUMEN
+        tiene_anomalia_actual = False
+        if isinstance(alerta_info, dict):
+            tiene_anomalia_actual = alerta_info.get("anomalia", False)
+        
+        resumen = {
+            "tiene_anomalia_actual": tiene_anomalia_actual,
+            "total_anomalias": len(anomalias_historicas),
+            "ultimo_consumo": ultimo_consumo,
+            "fecha_ultimo": fecha_ultimo,
+            "variacion_porcentual": variacion_porcentual
+        }
+        
+        # 5. ESTRUCTURA FINAL COMPATIBLE CON ConsumoResponse
         return {
             "nic": nic,
-            "usuario": current_user.email,
-            "alerta_actual": alerta,
-            "anomalias_historicas": anomalias,
-            "resumen": {
-                "tiene_anomalia_actual": alerta.get("anomalia", False) if alerta.get("estado") != "sin_datos" else False,
-                "total_anomalias": len([a for a in anomalias if a.get("anomalia") == -1]) if anomalias else 0,
-                "ultimo_consumo": alerta.get("consumo_kwh") if alerta.get("estado") != "sin_datos" else None,
-                "fecha_ultimo": alerta.get("fecha") if alerta.get("estado") != "sin_datos" else None,
-                "variacion_porcentual": alerta.get("comparado_trimestre") if alerta.get("estado") != "sin_datos" else None
-            }
+            "usuario": user.email,
+            "alerta_actual": alerta_info if isinstance(alerta_info, dict) else {
+                "nic": nic,
+                "estado": "sin_datos",
+                "anomalia": False,
+                "mensaje": "No hay datos de alerta disponibles"
+            },
+            "anomalias_historicas": anomalias_historicas,
+            "resumen": resumen
         }
         
     except Exception as e:
         return {
-            "error": f"Error consultando consumo: {str(e)}",
             "nic": nic,
-            "usuario": current_user.email,
-            "alerta_actual": {"estado": "error"},
+            "usuario": "Error",
+            "alerta_actual": {
+                "nic": nic,
+                "estado": "error",
+                "anomalia": False,
+                "mensaje": f"Error consultando consumo: {str(e)}"
+            },
             "anomalias_historicas": [],
             "resumen": {
                 "tiene_anomalia_actual": False,
@@ -137,53 +273,4 @@ def consultar_consumo(
                 "fecha_ultimo": None,
                 "variacion_porcentual": None
             }
-        }
-
-@router.get("/alerta_con_jwt/{nic}")
-def alerta_anomalia_con_jwt(
-    nic: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Obtener alerta de anomalía más reciente con JWT
-    """
-    try:
-        result = alerta_anomalia_actual(db, nic, current_user.id)
-        return {
-            **result,
-            "nic": nic,
-            "usuario": current_user.email
-        }
-    except Exception as e:
-        return {
-            "error": f"Error obteniendo alerta: {str(e)}",
-            "nic": nic,
-            "usuario": current_user.email,
-            "estado": "error"
-        }
-
-@router.get("/anomalias_con_jwt/{nic}")
-def obtener_anomalias_con_jwt(
-    nic: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Obtener todas las anomalías por NIC con JWT
-    """
-    try:
-        anomalias = detectar_anomalias_por_nic(db, nic, current_user.id)
-        return {
-            "nic": nic,
-            "usuario": current_user.email,
-            "anomalias": anomalias,
-            "total_anomalias": len([a for a in anomalias if a.get("anomalia") == -1]) if anomalias else 0
-        }
-    except Exception as e:
-        return {
-            "error": f"Error obteniendo anomalías: {str(e)}",
-            "nic": nic,
-            "usuario": current_user.email,
-            "anomalias": []
         }
