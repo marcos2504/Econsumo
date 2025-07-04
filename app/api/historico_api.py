@@ -714,4 +714,4 @@ def actualizar_registro_historico(
             "registro_id": registro_id,
             "registro_actualizado": False
         }
-
+    

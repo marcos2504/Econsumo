@@ -99,6 +99,27 @@ def verificar_estado_sistema():
         users_with_gmail = cursor.fetchone()[0]
         print(f"🔐 Usuarios con Gmail token: {users_with_gmail}")
         
+        cursor.execute("SELECT COUNT(*) FROM users WHERE gmail_refresh_token IS NOT NULL")
+        users_with_refresh = cursor.fetchone()[0]
+        print(f"🔄 Usuarios con Refresh token: {users_with_refresh}")
+        
+        # Mostrar detalles de tokens por usuario
+        cursor.execute("""
+            SELECT email, 
+                   gmail_token IS NOT NULL as tiene_gmail,
+                   gmail_refresh_token IS NOT NULL as tiene_refresh
+            FROM users 
+            WHERE gmail_token IS NOT NULL OR gmail_refresh_token IS NOT NULL
+        """)
+        users_tokens = cursor.fetchall()
+        
+        if users_tokens:
+            print("\n📊 DETALLE DE TOKENS POR USUARIO:")
+            for email, tiene_gmail, tiene_refresh in users_tokens:
+                gmail_status = "✅" if tiene_gmail else "❌"
+                refresh_status = "✅" if tiene_refresh else "❌"
+                print(f"  {email}: Gmail {gmail_status} | Refresh {refresh_status}")
+        
         conn.close()
         
     except Exception as e:

@@ -581,5 +581,4 @@ def sync_inteligente_con_jwt(
             "sync_completado": False,
             "modo_sincronizacion": modo_sync if 'modo_sync' in locals() else "desconocido"
         }
-
-
+    

@@ -287,3 +287,136 @@ def verificar_tokens_usuario(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error interno: {str(e)}"
         )
+
+@router.post("/renovar_para_notificaciones")
+def renovar_autorizacion_para_notificaciones(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    🔄 RENOVAR AUTORIZACIÓN PARA OBTENER REFRESH TOKEN
+    Intenta renovar la autorización para obtener refresh token para notificaciones
+    """
+    try:
+        user = get_user_by_email(db, current_user.email)
+        
+        if not user or not user.gmail_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Usuario no tiene access token de Gmail. Debe reautenticarse."
+            )
+        
+        logger.info(f"🔄 Intentando renovar autorización para: {user.email}")
+        
+        # Verificar si el access token actual es válido
+        import requests
+        
+        # Probar el access token actual
+        test_url = "https://www.googleapis.com/oauth2/v1/tokeninfo"
+        test_response = requests.get(f"{test_url}?access_token={user.gmail_token}")
+        
+        if test_response.status_code == 200:
+            token_info = test_response.json()
+            logger.info(f"✅ Access token válido. Scopes: {token_info.get('scope', 'N/A')}")
+            
+            # Verificar si incluye el scope de gmail
+            scopes = token_info.get('scope', '').split()
+            has_gmail_scope = any('gmail' in scope for scope in scopes)
+            
+            return {
+                "usuario": user.email,
+                "access_token_valido": True,
+                "tiene_scope_gmail": has_gmail_scope,
+                "scopes_actuales": scopes,
+                "puede_sincronizar": has_gmail_scope,
+                "tiene_refresh_token": bool(user.gmail_refresh_token),
+                "mensaje": "Access token válido pero SIN refresh token. Para notificaciones, necesitas reautenticarte desde Android con requestServerAuthCode.",
+                "solucion": {
+                    "opcion_1": "Reautenticarse desde Android con force=true en requestServerAuthCode",
+                    "opcion_2": "Revocar acceso en Google y reautenticarse",
+                    "url_revocar": f"https://myaccount.google.com/permissions"
+                }
+            }
+        else:
+            logger.warning(f"⚠️ Access token inválido o expirado")
+            return {
+                "usuario": user.email,
+                "access_token_valido": False,
+                "mensaje": "Access token inválido. Debe reautenticarse completamente.",
+                "accion_requerida": "Reautenticarse desde Android"
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error renovando autorización: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno: {str(e)}"
+        )
+
+@router.post("/revocar_y_reautenticar")
+def preparar_reautenticacion_completa(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    🚮 PREPARAR REAUTENTICACIÓN COMPLETA
+    Revoca tokens actuales para forzar nueva autorización con refresh token
+    """
+    try:
+        user = get_user_by_email(db, current_user.email)
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Usuario no encontrado"
+            )
+        
+        logger.info(f"🚮 Preparando reautenticación completa para: {user.email}")
+        
+        # Revocar access token actual si existe
+        if user.gmail_token:
+            try:
+                import requests
+                revoke_url = f"https://oauth2.googleapis.com/revoke?token={user.gmail_token}"
+                revoke_response = requests.post(revoke_url)
+                
+                if revoke_response.status_code == 200:
+                    logger.info("✅ Access token revocado exitosamente")
+                else:
+                    logger.warning(f"⚠️ No se pudo revocar access token: {revoke_response.status_code}")
+                    
+            except Exception as e:
+                logger.warning(f"Error revocando token: {e}")
+        
+        # Limpiar tokens en la base de datos
+        user.gmail_token = None
+        user.gmail_refresh_token = None
+        db.commit()
+        db.refresh(user)
+        
+        logger.info("🧹 Tokens limpiados de la base de datos")
+        
+        return {
+            "usuario": user.email,
+            "tokens_revocados": True,
+            "mensaje": "Tokens revocados. Ahora debes reautenticarte desde Android.",
+            "instrucciones": {
+                "paso_1": "En Android, cerrar sesión de Google Sign-In",
+                "paso_2": "Reautenticarse con requestServerAuthCode(webClientId, true)", 
+                "paso_3": "Asegurarse de que se envía el serverAuthCode al backend",
+                "paso_4": "El backend intercambiará por refresh token automáticamente"
+            },
+            "url_android_logout": "googleSignInClient.signOut()",
+            "backend_ready": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error preparando reautenticación: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno: {str(e)}"
+        )

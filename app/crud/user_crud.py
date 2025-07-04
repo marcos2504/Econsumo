@@ -15,8 +15,7 @@ def create_user(db: Session, user: UserCreate) -> User:
         google_id=user.google_id,
         full_name=user.full_name,  # Usar full_name en lugar de name
         picture=user.picture,
-        gmail_token=user.gmail_token,
-        gmail_refresh_token=getattr(user, 'gmail_refresh_token', None)
+        gmail_token=user.gmail_token
     )
     db.add(db_user)
     db.commit()
@@ -33,15 +32,7 @@ def update_user(db: Session, user: User, user_update: UserUpdate) -> User:
     db.refresh(user)
     return user
 
-def get_or_create_user(
-    db: Session, 
-    email: str, 
-    google_id: str, 
-    name: str, 
-    picture: str = None, 
-    gmail_token: str = None,
-    gmail_refresh_token: str = None
-) -> User:
+def get_or_create_user(db: Session, email: str, google_id: str, name: str, picture: str = None, gmail_token: str = None, gmail_refresh_token: str = None) -> User:
     # Buscar por google_id primero
     user = get_user_by_google_id(db, google_id)
     if user:
