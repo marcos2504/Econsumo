@@ -3,6 +3,7 @@ from sklearn.ensemble import IsolationForest
 from sqlalchemy.orm import Session
 from app.models.historico_model import HistoricoConsumo
 from app.models.factura_model import Factura
+import numpy as np
 
 def detectar_anomalias_por_nic(db: Session, nic: str, user_id: int):
     # Buscar históricos a través de la relación con facturas filtrado por usuario
@@ -27,7 +28,7 @@ def detectar_anomalias_por_nic(db: Session, nic: str, user_id: int):
     resultados = []
 
     for trimestre, grupo in df.groupby("trimestre"):
-        if len(grupo) < 0:
+        if len(grupo) < 1:
             continue
 
         num_trim = trimestre.quarter
@@ -35,20 +36,69 @@ def detectar_anomalias_por_nic(db: Session, nic: str, user_id: int):
         historico = df[(df["fecha"].dt.quarter == num_trim) & (df["año"] < año_actual)]
 
         if len(historico) < 1:
-            continue
+            # Si no hay datos históricos, usar todo el historial disponible
+            historico = df[df["año"] < año_actual]
+            if len(historico) < 1:
+                continue
 
         X_train = historico[["consumo_kwh"]]
         X_test = grupo[["consumo_kwh"]]
 
-        modelo = IsolationForest(contamination=0.1, random_state=42)
+        # 🔧 MEJORAS EN EL MODELO DE DETECCIÓN
+        
+        # 1. Calcular estadísticas del histórico
+        promedio_historico = X_train["consumo_kwh"].mean()
+        std_historico = X_train["consumo_kwh"].std()
+        q75 = X_train["consumo_kwh"].quantile(0.75)
+        q25 = X_train["consumo_kwh"].quantile(0.25)
+        iqr = q75 - q25
+        
+        # 2. Usar modelo de Isolation Forest con configuración mejorada
+        # Contamination más agresiva para detectar extremos
+        contamination_rate = min(0.3, max(0.05, 1.0 / len(X_train))) if len(X_train) > 3 else 0.5
+        modelo = IsolationForest(contamination=contamination_rate, random_state=42, n_estimators=200)
         modelo.fit(X_train)
 
         grupo = grupo.copy()
-        grupo["anomalia"] = modelo.predict(X_test)
-        grupo["score"] = modelo.decision_function(X_test)
+        
+        # 3. Predicción del modelo
+        prediccion_modelo = modelo.predict(X_test)
+        scores_modelo = modelo.decision_function(X_test)
+        
+        # 4. REGLAS ADICIONALES PARA DETECCIÓN EXTREMA
+        # Detectar anomalías por desviación extrema (>300% o <-70%)
+        variaciones = ((grupo["consumo_kwh"] - promedio_historico) / promedio_historico * 100)
+        
+        anomalias_finales = []
+        for i, (score, variacion, consumo) in enumerate(zip(scores_modelo, variaciones, grupo["consumo_kwh"])):
+            # Regla 1: Modelo detecta anomalía
+            anomalia_modelo = prediccion_modelo[i] == -1
+            
+            # Regla 2: Variación extrema (>200% o <-60%)
+            anomalia_extrema = abs(variacion) > 200
+            
+            # Regla 3: Fuera del rango IQR extremo (>3*IQR del Q75)
+            anomalia_iqr = consumo > (q75 + 3 * iqr) or consumo < (q25 - 3 * iqr)
+            
+            # Regla 4: Más de 4 desviaciones estándar
+            anomalia_std = abs(consumo - promedio_historico) > (4 * std_historico)
+            
+            # DECISIÓN FINAL: Es anomalía si cumple cualquiera de las reglas
+            es_anomalia = anomalia_modelo or anomalia_extrema or anomalia_iqr or anomalia_std
+            
+            anomalias_finales.append(-1 if es_anomalia else 1)
+        
+        grupo["anomalia"] = anomalias_finales
+        grupo["score"] = scores_modelo
         grupo["trimestre"] = grupo["trimestre"].astype(str)
-        promedio_trimestre = X_train["consumo_kwh"].mean()
-        grupo["comparado_trimestre"] = ((grupo["consumo_kwh"] - promedio_trimestre) / promedio_trimestre * 100).round(1)
+        
+        # 5. Calcular comparación con promedio histórico
+        grupo["comparado_trimestre"] = ((grupo["consumo_kwh"] - promedio_historico) / promedio_historico * 100).round(1)
+        
+        # 6. Agregar información de debugging
+        grupo["promedio_historico"] = promedio_historico
+        grupo["std_historico"] = std_historico
+        grupo["variacion_abs"] = abs(grupo["comparado_trimestre"])
 
         resultados.append(grupo)
 

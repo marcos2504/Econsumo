@@ -19,27 +19,33 @@ GOOGLE_OAUTH_CONFIG = {
 GMAIL_CONFIG = {
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
-    "email_query": 'subject:"Factura Digital"',
-    "max_emails_per_check": 50,
-    "rate_limit_delay": 1  # segundos entre requests
+    "email_query": os.getenv("GMAIL_SEARCH_QUERY", 'subject:"Factura Digital"'),  # Del .env
+    "sender_email": os.getenv("GMAIL_SENDER_EMAIL", "noreply@edemsa.com.ar"),  # Del .env
+    "max_emails_per_check": int(os.getenv("MAX_EMAILS_PER_CHECK", 50)),  # Del .env
+    "max_emails_to_process": int(os.getenv("MAX_EMAILS_TO_PROCESS", 1)),  # Solo el más reciente
+    "rate_limit_delay": int(os.getenv("RATE_LIMIT_DELAY", 1))  # Del .env
 }
 
 # Configuración de detección de anomalías
 ANOMALY_CONFIG = {
-    "min_score_threshold": -0.5,  # Score mínimo para considerar anomalía
-    "min_increase_percentage": 20,  # Aumento mínimo % para alertar
-    "contamination_rate": 0.1,  # Tasa de contaminación para IsolationForest
+    "min_score_threshold": float(os.getenv("ANOMALY_CONTAMINATION_RATE", -0.5)),  # Compatible con .env
+    "min_increase_percentage": int(os.getenv("ANOMALY_EXTREME_THRESHOLD", 200)),  # Compatible con .env
+    "contamination_rate": float(os.getenv("ANOMALY_CONTAMINATION_RATE", 0.2)),  # Del .env
+    "max_contamination_rate": float(os.getenv("MAX_CONTAMINATION_RATE", 0.3)),  # Del .env
+    "min_contamination_rate": float(os.getenv("MIN_CONTAMINATION_RATE", 0.05)),  # Del .env
+    "iqr_multiplier": int(os.getenv("IQR_MULTIPLIER", 3)),  # Del .env
+    "std_deviation_threshold": int(os.getenv("STD_DEVIATION_THRESHOLD", 4)),  # Del .env
     "min_historical_data": 3,  # Mínimo de datos históricos para comparar
     "alert_cooldown_hours": 24  # Horas entre alertas para el mismo NIC
 }
 
 # Configuración de monitoreo automático
 MONITORING_CONFIG = {
-    "default_interval_hours": 2,  # Intervalo por defecto entre monitoreos
+    "default_interval_hours": int(os.getenv("MONITORING_FREQUENCY_MINUTES", 30)) / 60,  # Del .env convertido a horas
     "min_interval_hours": 0.5,  # Intervalo mínimo permitido
     "max_interval_hours": 24,  # Intervalo máximo permitido
-    "max_concurrent_users": 10,  # Máximo de usuarios procesando simultáneamente
-    "timeout_per_user_seconds": 300  # Timeout por usuario
+    "max_concurrent_users": int(os.getenv("MAX_CONCURRENT_USERS", 10)),  # Del .env
+    "timeout_per_user_seconds": int(os.getenv("TIMEOUT_PER_USER_SECONDS", 300))  # Del .env
 }
 
 # Configuración de logging

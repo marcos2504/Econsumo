@@ -144,7 +144,7 @@ if __name__ == "__main__":
     verificar_estado_sistema()
     
     # Generar JWT para el usuario
-    email = "marcosibarra1234@gmail.com"
+    email = "ibarramarcos2001@gmail.com"  # Usuario 3
     jwt_token = generar_jwt_para_usuario(email)
     
     if jwt_token:

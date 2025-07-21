@@ -516,6 +516,378 @@ def historico_por_periodo(
             "datos": []
         }
 
+# NUEVO ENDPOINT OPTIMIZADO PARA FILTRADO POR FECHAS Y GRÁFICOS
+@router.get("/grafico_barras/{nic}")
+def historico_grafico_barras(
+    nic: str,
+    fecha_desde: Optional[str] = Query(None, description="Fecha desde formato MM/YY (ej: 01/24)"),
+    fecha_hasta: Optional[str] = Query(None, description="Fecha hasta formato MM/YY (ej: 12/24)"),
+    fecha_especifica: Optional[str] = Query(None, description="Fecha específica MM/YY (ej: 02/24)"),
+    periodo_meses: Optional[int] = Query(None, description="Últimos X meses desde hoy"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    📊 ENDPOINT OPTIMIZADO PARA GRÁFICOS DE BARRAS
+    Filtrado inteligente por fechas con ordenamiento cronológico correcto
+    
+    Args:
+        nic: Número de NIC
+        fecha_desde: Fecha desde (MM/YY) - ej: 01/24
+        fecha_hasta: Fecha hasta (MM/YY) - ej: 12/24  
+        fecha_especifica: Una fecha específica (MM/YY) - ej: 02/24
+        periodo_meses: Últimos X meses (alternativa a fechas específicas)
+    
+    Returns:
+        Datos optimizados para gráfico de barras con fechas ordenadas cronológicamente
+    
+    Examples:
+        /historico/grafico_barras/3005000?fecha_especifica=02/24
+        /historico/grafico_barras/3005000?fecha_desde=01/24&fecha_hasta=06/24
+        /historico/grafico_barras/3005000?periodo_meses=6
+    """
+    try:
+        def convertir_fecha_a_numero(fecha_str):
+            """Convierte MM/YY a número para ordenamiento: 02/24 -> 202402"""
+            try:
+                if '/' in fecha_str and len(fecha_str.split('/')) == 2:
+                    mes, año = fecha_str.split('/')
+                    # Convertir año de 2 dígitos a 4 dígitos
+                    año_completo = int("20" + año.zfill(2))
+                    mes_num = int(mes.zfill(2))
+                    return año_completo * 100 + mes_num  # 2024*100 + 02 = 202402
+                return 0
+            except:
+                return 0
+
+        # Query base - obtener TODOS los registros del NIC primero
+        historico_completo = db.query(HistoricoConsumo)\
+                              .join(Factura, HistoricoConsumo.factura_id == Factura.id)\
+                              .filter(Factura.nic == nic, Factura.user_id == current_user.id)\
+                              .all()
+        
+        if not historico_completo:
+            return {
+                "nic": nic,
+                "usuario": current_user.email,
+                "mensaje": "No se encontró histórico para este NIC",
+                "filtros_aplicados": {
+                    "fecha_desde": fecha_desde,
+                    "fecha_hasta": fecha_hasta,
+                    "fecha_especifica": fecha_especifica,
+                    "periodo_meses": periodo_meses
+                },
+                "datos": [],
+                "para_grafico_barras": [],
+                "estadisticas": None
+            }
+
+        # Convertir a lista con números para ordenamiento
+        registros_con_orden = []
+        for registro in historico_completo:
+            numero_fecha = convertir_fecha_a_numero(registro.fecha)
+            registros_con_orden.append({
+                "registro": registro,
+                "numero_fecha": numero_fecha,
+                "fecha_original": registro.fecha
+            })
+
+        # Filtrar según los parámetros
+        registros_filtrados = []
+
+        if fecha_especifica:
+            # Buscar una fecha específica
+            numero_especifico = convertir_fecha_a_numero(fecha_especifica)
+            registros_filtrados = [r for r in registros_con_orden if r["numero_fecha"] == numero_especifico]
+            
+        elif fecha_desde or fecha_hasta:
+            # Filtrar por rango de fechas
+            numero_desde = convertir_fecha_a_numero(fecha_desde) if fecha_desde else 0
+            numero_hasta = convertir_fecha_a_numero(fecha_hasta) if fecha_hasta else 999999
+            
+            registros_filtrados = [
+                r for r in registros_con_orden 
+                if numero_desde <= r["numero_fecha"] <= numero_hasta
+            ]
+            
+        elif periodo_meses:
+            # Obtener los últimos X meses
+            # Ordenar por fecha descendente y tomar los primeros X
+            registros_ordenados_desc = sorted(registros_con_orden, key=lambda x: x["numero_fecha"], reverse=True)
+            registros_filtrados = registros_ordenados_desc[:periodo_meses]
+            
+        else:
+            # Sin filtros, devolver todo
+            registros_filtrados = registros_con_orden
+
+        if not registros_filtrados:
+            return {
+                "nic": nic,
+                "usuario": current_user.email,
+                "mensaje": "No se encontraron datos para los filtros aplicados",
+                "filtros_aplicados": {
+                    "fecha_desde": fecha_desde,
+                    "fecha_hasta": fecha_hasta,
+                    "fecha_especifica": fecha_especifica,
+                    "periodo_meses": periodo_meses
+                },
+                "datos": [],
+                "para_grafico_barras": [],
+                "estadisticas": None
+            }
+
+        # Ordenar cronológicamente (ascendente)
+        registros_filtrados.sort(key=lambda x: x["numero_fecha"])
+
+        # Formatear datos para respuesta
+        datos_formateados = []
+        consumos = []
+        
+        for item in registros_filtrados:
+            registro = item["registro"]
+            
+            # Obtener información adicional de la factura
+            factura = db.query(Factura).filter(Factura.id == registro.factura_id).first()
+            direccion = factura.direccion if factura else "N/A"
+            
+            consumo_valor = float(registro.consumo_kwh) if registro.consumo_kwh else 0
+            
+            dato = {
+                "id": registro.id,
+                "fecha": registro.fecha,
+                "fecha_ordenable": item["numero_fecha"],  # Para debugging
+                "consumo_kwh": consumo_valor,
+                "nic": nic,
+                "direccion": direccion,
+                "factura_id": registro.factura_id
+            }
+            datos_formateados.append(dato)
+            consumos.append(consumo_valor)
+
+        # Datos específicos para gráfico de barras
+        para_grafico_barras = [
+            {
+                "fecha": dato["fecha"],
+                "consumo": dato["consumo_kwh"],
+                "label": f"{dato['fecha']} ({dato['consumo_kwh']} kWh)"  # Label descriptivo
+            }
+            for dato in datos_formateados
+        ]
+
+        # Calcular estadísticas
+        if consumos:
+            promedio = sum(consumos) / len(consumos)
+            maximo = max(consumos)
+            minimo = min(consumos)
+            total_consumo = sum(consumos)
+            
+            # Encontrar meses con mayor y menor consumo
+            max_index = consumos.index(maximo)
+            min_index = consumos.index(minimo)
+            mes_mayor_consumo = datos_formateados[max_index]["fecha"]
+            mes_menor_consumo = datos_formateados[min_index]["fecha"]
+        else:
+            promedio = maximo = minimo = total_consumo = 0
+            mes_mayor_consumo = mes_menor_consumo = None
+
+        return {
+            "nic": nic,
+            "usuario": current_user.email,
+            "filtros_aplicados": {
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+                "fecha_especifica": fecha_especifica,
+                "periodo_meses": periodo_meses,
+                "tipo_filtro": "fecha_especifica" if fecha_especifica else 
+                              "rango_fechas" if (fecha_desde or fecha_hasta) else 
+                              "ultimos_meses" if periodo_meses else "sin_filtro"
+            },
+            "total_registros": len(datos_formateados),
+            "datos": datos_formateados,
+            "para_grafico_barras": para_grafico_barras,
+            "estadisticas": {
+                "promedio": round(promedio, 2),
+                "maximo": round(maximo, 2),
+                "minimo": round(minimo, 2),
+                "total_consumo": round(total_consumo, 2),
+                "mes_mayor_consumo": mes_mayor_consumo,
+                "mes_menor_consumo": mes_menor_consumo,
+                "periodo_analizado": len(consumos)
+            },
+            "orden": "cronologico_ascendente",
+            "formato_fecha": "MM/YY",
+            "listo_para_grafico": True
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Error en gráfico de barras: {str(e)}",
+            "nic": nic,
+            "usuario": current_user.email,
+            "datos": [],
+            "para_grafico_barras": []
+        }
+
+@router.get("/periodo_personalizado/{nic}")
+def historico_periodo_personalizado(
+    nic: str,
+    fechas: str = Query(..., description="Fechas separadas por comas: 01/24,02/24,03/24 o rango: 01/24-06/24"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    📅 HISTÓRICO PARA FECHAS ESPECÍFICAS MÚLTIPLES
+    Permite consultar varias fechas específicas o un rango
+    
+    Args:
+        nic: Número de NIC
+        fechas: Fechas específicas separadas por comas o rango con guión
+    
+    Examples:
+        /historico/periodo_personalizado/3005000?fechas=01/24,02/24,03/24
+        /historico/periodo_personalizado/3005000?fechas=01/24-06/24
+    """
+    try:
+        def convertir_fecha_a_numero(fecha_str):
+            """Convierte MM/YY a número para ordenamiento"""
+            try:
+                if '/' in fecha_str and len(fecha_str.split('/')) == 2:
+                    mes, año = fecha_str.split('/')
+                    año_completo = int("20" + año.zfill(2))
+                    mes_num = int(mes.zfill(2))
+                    return año_completo * 100 + mes_num
+                return 0
+            except:
+                return 0
+
+        # Procesar parámetro de fechas
+        fechas_objetivo = []
+        
+        if '-' in fechas and ',' not in fechas:
+            # Es un rango: 01/24-06/24
+            try:
+                fecha_inicio, fecha_fin = fechas.split('-')
+                fecha_inicio = fecha_inicio.strip()
+                fecha_fin = fecha_fin.strip()
+                
+                num_inicio = convertir_fecha_a_numero(fecha_inicio)
+                num_fin = convertir_fecha_a_numero(fecha_fin)
+                
+                # Generar todas las fechas en el rango
+                año_inicio = num_inicio // 100
+                mes_inicio = num_inicio % 100
+                año_fin = num_fin // 100
+                mes_fin = num_fin % 100
+                
+                año_actual = año_inicio
+                mes_actual = mes_inicio
+                
+                while (año_actual * 100 + mes_actual) <= num_fin:
+                    fecha_str = f"{mes_actual:02d}/{str(año_actual)[-2:]}"
+                    fechas_objetivo.append(fecha_str)
+                    
+                    mes_actual += 1
+                    if mes_actual > 12:
+                        mes_actual = 1
+                        año_actual += 1
+                        
+            except Exception as e:
+                return {
+                    "error": f"Error procesando rango de fechas '{fechas}': {str(e)}",
+                    "formato_esperado": "01/24-06/24"
+                }
+        else:
+            # Son fechas específicas separadas por comas
+            fechas_objetivo = [f.strip() for f in fechas.split(',')]
+
+        # Buscar registros
+        historico_completo = db.query(HistoricoConsumo)\
+                              .join(Factura, HistoricoConsumo.factura_id == Factura.id)\
+                              .filter(Factura.nic == nic, Factura.user_id == current_user.id)\
+                              .all()
+        
+        if not historico_completo:
+            return {
+                "nic": nic,
+                "fechas_solicitadas": fechas_objetivo,
+                "mensaje": "No hay histórico para este NIC",
+                "datos": []
+            }
+
+        # Filtrar registros que coincidan con las fechas objetivo
+        registros_encontrados = []
+        fechas_encontradas = []
+        fechas_no_encontradas = []
+        
+        for fecha_obj in fechas_objetivo:
+            encontrado = False
+            for registro in historico_completo:
+                if registro.fecha == fecha_obj:
+                    registros_encontrados.append({
+                        "registro": registro,
+                        "numero_fecha": convertir_fecha_a_numero(registro.fecha)
+                    })
+                    fechas_encontradas.append(fecha_obj)
+                    encontrado = True
+                    break
+            
+            if not encontrado:
+                fechas_no_encontradas.append(fecha_obj)
+
+        # Ordenar cronológicamente
+        registros_encontrados.sort(key=lambda x: x["numero_fecha"])
+
+        # Formatear datos
+        datos_formateados = []
+        consumos = []
+        
+        for item in registros_encontrados:
+            registro = item["registro"]
+            consumo_valor = float(registro.consumo_kwh) if registro.consumo_kwh else 0
+            
+            dato = {
+                "id": registro.id,
+                "fecha": registro.fecha,
+                "consumo_kwh": consumo_valor,
+                "factura_id": registro.factura_id
+            }
+            datos_formateados.append(dato)
+            consumos.append(consumo_valor)
+
+        # Estadísticas
+        if consumos:
+            estadisticas = {
+                "promedio": round(sum(consumos) / len(consumos), 2),
+                "maximo": round(max(consumos), 2),
+                "minimo": round(min(consumos), 2),
+                "total": round(sum(consumos), 2)
+            }
+        else:
+            estadisticas = {"promedio": 0, "maximo": 0, "minimo": 0, "total": 0}
+
+        return {
+            "nic": nic,
+            "usuario": current_user.email,
+            "fechas_solicitadas": fechas_objetivo,
+            "fechas_encontradas": fechas_encontradas,
+            "fechas_no_encontradas": fechas_no_encontradas,
+            "total_registros": len(datos_formateados),
+            "datos": datos_formateados,
+            "para_grafico": [
+                {"fecha": d["fecha"], "consumo": d["consumo_kwh"]}
+                for d in datos_formateados
+            ],
+            "estadisticas": estadisticas,
+            "orden": "cronologico"
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Error en período personalizado: {str(e)}",
+            "nic": nic,
+            "fechas_parametro": fechas
+        }
+
 # ENDPOINT PARA AGREGAR HISTÓRICO MANUALMENTE CON VALIDACIÓN
 @router.post("/agregar_registro")
 def agregar_registro_historico(
@@ -714,4 +1086,3 @@ def actualizar_registro_historico(
             "registro_id": registro_id,
             "registro_actualizado": False
         }
-    

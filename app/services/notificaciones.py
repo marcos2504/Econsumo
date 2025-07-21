@@ -94,10 +94,10 @@ class NotificacionService:
             logger.error(f"Error renovando access token: {str(e)}")
             return None
     
-    def buscar_nuevos_emails(self, user: User, desde_fecha: datetime, db: Session) -> List[str]:
-        """Buscar nuevos emails de facturas desde una fecha específica"""
+    def buscar_email_mas_reciente(self, user: User, db: Session) -> List[str]:
+        """Buscar el email más reciente de EDEMSA Factura Digital (sin filtros de fecha)"""
         try:
-            logger.info(f"🔍 Buscando emails para {user.email} desde {desde_fecha.strftime('%Y-%m-%d %H:%M')}")
+            logger.info(f"🔍 Buscando el email más reciente de EDEMSA para {user.email}")
             
             # Renovar access token si es necesario
             if not user.gmail_token:
@@ -113,27 +113,33 @@ class NotificacionService:
                 db.refresh(user)
                 logger.info(f"Token renovado y guardado para {user.email}")
             
-            service = get_service(user.gmail_token)
+            service = get_service(user.gmail_token, user.gmail_refresh_token)
             
-            # Construir query con fecha más específica
-            # Usar formato correcto para Gmail API (yyyy/mm/dd)
-            fecha_str = desde_fecha.strftime("%Y/%m/%d")
-            query = f'from:noreply@edemsa.com.ar subject:"Aviso de Factura" after:{fecha_str}'
+            # Query simplificado - solo el email más reciente
+            search_query = GMAIL_CONFIG["email_query"]
+            max_emails = GMAIL_CONFIG["max_emails_to_process"]
             
-            logger.info(f"Query Gmail: {query}")
+            # Sin filtros de fecha - solo buscar el más reciente
+            query = search_query
             
-            # Buscar mensajes
-            results = service.users().messages().list(userId='me', q=query).execute()
+            logger.info(f"Query Gmail simplificado: {query} (máximo {max_emails} emails)")
+            
+            # Buscar mensajes - solo el más reciente
+            results = service.users().messages().list(
+                userId='me', 
+                q=query, 
+                maxResults=max_emails  # Solo 1 email
+            ).execute()
             messages = results.get('messages', [])
             
-            logger.info(f"📧 Encontrados {len(messages)} emails desde {fecha_str} para {user.email}")
+            logger.info(f"📧 Encontrado {len(messages)} email más reciente para {user.email}")
             
             # Extraer links de EDEMSA
             links = []
             for msg in messages:
                 try:
                     msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
-                    # Aquí reutilizamos la lógica del extractor existente
+                    # Reutilizar la lógica del extractor existente
                     html_data = self._get_html_part(msg_data['payload'])
                     if html_data:
                         import base64
@@ -289,7 +295,7 @@ class NotificacionService:
     def _enviar_via_gmail_api(self, user: User, contenido_html: str) -> bool:
         """Enviar email usando Gmail API"""
         try:
-            service = get_service(user.gmail_token)
+            service = get_service(user.gmail_token, user.gmail_refresh_token)
             
             # Crear mensaje
             message = MIMEMultipart()
@@ -406,13 +412,11 @@ class NotificacionService:
         }
         
         try:
-            # 1. Obtener última fecha de procesamiento
-            ultima_fecha = self.obtener_ultima_fecha_lectura(db, user.id)
-            resultado["ultima_fecha_procesamiento"] = ultima_fecha.isoformat()
-            logger.info(f"👤 Procesando usuario {user.email} desde {ultima_fecha.strftime('%Y-%m-%d %H:%M')}")
+            # Buscar solo el email más reciente (sin filtros de fecha)
+            logger.info(f"👤 Procesando usuario {user.email} - buscando email más reciente")
             
-            # 2. Buscar nuevos emails
-            links = self.buscar_nuevos_emails(user, ultima_fecha, db)
+            # 2. Buscar el email más reciente
+            links = self.buscar_email_mas_reciente(user, db)
             resultado["emails_nuevos"] = len(links)
             
             if not links:

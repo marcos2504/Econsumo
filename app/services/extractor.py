@@ -20,15 +20,22 @@ from sqlalchemy.orm import Session
 EMAIL_QUERY = 'subject:"Factura Digital"'
 
 # === GMAIL ===
-def get_service(gmail_token=None):
+def get_service(gmail_token=None, refresh_token=None):
     """
     Obtener servicio de Gmail usando token OAuth o archivo token.json
     """
     try:
         if gmail_token:
-            # Usar token OAuth directamente
+            # Importar configuración OAuth
+            from app.config.notifications_config import GOOGLE_OAUTH_CONFIG
+            
+            # Usar token OAuth con toda la información necesaria para renovación
             creds = Credentials(
                 token=gmail_token,
+                refresh_token=refresh_token,
+                token_uri=GOOGLE_OAUTH_CONFIG["token_uri"],
+                client_id=GOOGLE_OAUTH_CONFIG["client_id"],
+                client_secret=GOOGLE_OAUTH_CONFIG["client_secret"],
                 scopes=SCOPES
             )
         else:
